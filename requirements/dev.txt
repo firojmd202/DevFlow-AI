@@ -1,0 +1,12 @@
+-r base.txt
+
+# Pydantic ships its MyPy plugin in the base package.
+ruff==0.7.4
+mypy==2.4.1
+pre-commit==4.7.0
+pip-audit==2.10.1
+bandit[toml]==1.9.4
+detect-secrets==1.5.0
+build==1.6.1
+setuptools==84.2.1
+editorconfig==0.17.1
