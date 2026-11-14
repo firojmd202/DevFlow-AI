@@ -37,3 +37,4 @@ tests
 docs
 *.md
 **/*.md
+!README.md
