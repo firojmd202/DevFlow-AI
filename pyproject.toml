@@ -27,14 +27,19 @@ src = ["src"]
 select = ["E", "F", "I", "UP", "B", "S", "ANN"]
 ignore = ["ANN101", "ANN102"]
 
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = ["S101"]
+
 [tool.mypy]
 strict = true
+mypy_path = "$MYPY_CONFIG_FILE_DIR/src"
 python_version = "3.12"
 plugins = ["pydantic.mypy"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
 addopts = "-v --tb=short"
 markers = ["integration: marks tests requiring external resources (skipped in CI by default)"]
 
