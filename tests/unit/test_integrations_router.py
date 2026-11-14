@@ -3,20 +3,7 @@ import pytest
 from fastapi import FastAPI
 
 from devflow_api.adapters.registry import registry
-
-MODES = {
-    "antigravity": "unknown",
-    "chatgpt": "automated_api",
-    "claude": "automated_api",
-    "codex": "cli_handoff",
-    "figma": "automated_api",
-    "github": "automated_api",
-    "kiro": "manual_handoff",
-    "mcp": "automated_api",
-    "notebooklm": "manual_handoff",
-    "ollama": "automated_api",
-    "stitch": "unknown",
-}
+from tests.adapter_expectations import MODES
 
 
 async def test_discovery(test_client: httpx.AsyncClient, api_app: FastAPI) -> None:
