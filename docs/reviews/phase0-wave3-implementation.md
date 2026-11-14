@@ -167,3 +167,22 @@ Task 15 formal settings, logging and model regressions; Task 16 router tests; Ta
 **READY FOR REVIEW.** Wave 4 has not begun.
 
 **Recommended Git commit message** `feat: implement Phase 0 Wave 3 application foundations`
+
+## Final approval checks
+
+Reviewed merge commit `b01ac20` against the committed v1.1.1 specifications on Windows with Python 3.12.10 from `.venv/wave3`.
+
+| Check | Result | Evidence |
+|---|---|---|
+| 1. Codex request and result types | PASS | Design §7.4 and Task 12 at lines 510–511 explicitly specify dataclasses for both Codex types. `src/devflow_api/adapters/protocols/codex.py:9` and `:18` match the required fields and defaults. No type conversion was needed. |
+| 2. Stateless POST IDs | PASS | Task 11 at lines 448–455 specifies an input echo with ID 1 for Projects and the same pattern for Learning. Both handlers at line 21 returned HTTP 200 and ID 1 on repeated POSTs. Both lists stayed empty and both item lookups returned the structured 404. No records are persisted. |
+| 3. Requirements correction | PASS | `git diff -- .kiro/specs/foundation-and-architecture/requirements.md` exited 0 with no working-tree changes. `git diff --unified=0 c5e37c8 HEAD -- .kiro/specs/foundation-and-architecture/requirements.md` exited 0 and showed only the replacement of REQ-6.3.3 at line 316. The Kiro `task: str` and NotebookLM `notebook_context: str` signatures match Task 12 and design §7.3. |
+| 4a. `python -m ruff check .` | PASS | Exit 0. All checks passed. |
+| 4b. `python -m ruff format --check src/` | PASS | Exit 0. All 72 files were formatted. |
+| 4c. `python -m mypy --strict src/` | PASS | Exit 0. No issues in 72 source files. |
+| 4d. `python -m pip check` | PASS | Exit 0. No broken requirements. |
+| 4e. `python -m build --no-isolation` | PASS | Exit 0. Built `devflow_ai-0.1.0.tar.gz` and `devflow_ai-0.1.0-py3-none-any.whl`. |
+| 4f. Targeted offline adapter and API probes | PASS | Inline Python via `python -` exited 0. Verified dataclass field names and request defaults, rejection before approval, the approved stub result, all eleven health contracts and execution modes, and both manual-handoff signatures. Network connections and process creation were trapped during adapter checks. The temporary Codex workspace stayed empty. The same probe checked both POST routes through ASGITransport. |
+| 5. Report update | PASS | Only `docs/reviews/phase0-wave3-implementation.md` was changed in this approval pass. No new deviations were found in the checked scope. |
+
+**Final recommendation — READY FOR REVIEW.** All scoped checks passed. Formal Wave 4 regression suites remain deferred. No commit or push was made.
