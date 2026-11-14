@@ -1,7 +1,10 @@
 # DevFlow-AI
+
 ## Project goals
 
 DevFlow AI is a local-first development and learning orchestrator. Phase 0 establishes its application structure, offline adapter contracts, and testing workflow.
+
+Phase 0 adapters return stub responses or manual instructions. They make no provider calls. The Codex approval gate returns a stub result after approval and launches no CLI process.
 
 ## Architecture
 

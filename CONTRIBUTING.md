@@ -11,7 +11,7 @@ On Linux or macOS, run `make dev`, then `.venv/bin/python -m pip install -r requ
 - Run `python -m ruff check . --output-format=github` and `python -m ruff format --check .`.
 - Run `python -m mypy --strict src/ tests/`.
 - Run `python -m pytest -m "not integration" --cov=src --cov-fail-under=80 --cov-report=term-missing --cov-report=xml --cov-report=html`.
-- Run `python -m pytest -m integration` to exercise the temporary SQLite migration round-trip.
+- Run `python -m pytest -m integration -v` to exercise the temporary SQLite migration round-trip.
 - Regenerate the OpenAPI document with `make docs` or `.\scripts\dev.ps1 -Task docs` when the contract changes.
 
 ## Add or change an adapter
