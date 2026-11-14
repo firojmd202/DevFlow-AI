@@ -313,7 +313,7 @@ THEN a typed Python `Protocol` MUST exist for each of the eleven integrations in
 **Acceptance Criteria:**  
 6.3.1 — Each protocol is defined in `src/devflow_api/adapters/protocols/` with one file per integration.  
 6.3.2 — All protocols pass `mypy --strict` without errors.  
-6.3.3 — `manual_handoff` protocols expose only `health_check` and `get_instructions(self) -> str`.  
+6.3.3 — Beyond `health_check`, Kiro exposes only `get_instructions(task: str) -> str` and NotebookLM exposes only `get_instructions(notebook_context: str) -> str`.
 6.3.4 — `unknown` protocols expose only `health_check`.
 
 ### REQ-6.4
