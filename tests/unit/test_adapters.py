@@ -30,8 +30,8 @@ from devflow_api.adapters.stubs.mcp import MCPStubAdapter
 from devflow_api.adapters.stubs.notebooklm import NotebookLMStubAdapter
 from devflow_api.adapters.stubs.ollama import OllamaStubAdapter
 from devflow_api.adapters.stubs.stitch import StitchStubAdapter
+from tests.adapter_expectations import MODES
 from tests.conftest import ROOT
-from tests.unit.test_integrations_router import MODES
 
 ADAPTERS = {
     "chatgpt": ChatGPTStubAdapter,

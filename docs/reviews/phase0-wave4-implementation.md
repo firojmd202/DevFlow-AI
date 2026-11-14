@@ -83,3 +83,43 @@ Wave 5 Docker, CI and security workflows, pre-commit, and delivery documentation
 **READY FOR REVIEW.** Work stopped after Wave 4. Nothing was committed or pushed.
 
 **Recommended commit message** `test: implement Phase 0 Wave 4 regression suite`
+
+## Final review corrections
+
+The follow-up branch `codex/wave4-review-corrections` was created from freshly fetched `origin/develop` at `16ede44` with a clean working tree. The first-parent history shows Wave 4 PR #2 at that commit and Wave 3 PR #1 at `b01ac20`. An ancestry check confirmed that the Wave 3 source commit `46d9c14` is reachable from the follow-up baseline.
+
+### Canonical Wave 5 CI coverage command
+
+```powershell
+python -m pytest --cov=src --cov-fail-under=80 --cov-report=term-missing --cov-report=xml
+```
+
+This command gates the full source tree at 80% and writes terminal details and `coverage.xml`. The earlier package-name run reported 84.79% and did not attribute the file-based Streamlit AppTest entry point and pages in that invocation. The source-path run includes those files and credited their executed lines. No coverage threshold or production exclusion was changed. Wave 5 CI configuration remains deferred.
+
+### Test isolation and files changed
+
+- Added `tests/adapter_expectations.py` and updated `tests/unit/test_adapters.py` and `tests/unit/test_integrations_router.py` to import the shared mode mapping. Expected values and assertions are identical to the merged suite.
+- Preserved the autouse network guard. It blocks DNS and external TCP connections. The numeric loopback exception for `127.0.0.1` and `::1` allows Windows asyncio to create its internal wakeup socket pair. Router tests use ASGITransport and Settings health is mocked. External provider calls are blocked. Production integrations were left intact.
+- Updated this review report.
+
+### Validation
+
+Commands ran on Windows under Python 3.12.10 in `.venv/wave3`.
+
+| Command | Exit | Result |
+|---|---:|---|
+| `git fetch origin` | 0 | Fetched Wave 4 merge at `16ede44` |
+| `git merge-base --is-ancestor 46d9c14 HEAD` | 0 | Wave 3 source is in the follow-up branch ancestry |
+| `python -m ruff check .` | 0 | All checks passed |
+| `python -m ruff format --check src/ tests/` | 0 | 88 files already formatted |
+| `python -m mypy --strict src/` | 0 | 72 source files checked |
+| `python -m mypy --strict tests/` | 0 | 16 test files checked |
+| `python -m pytest -v` | 0 | 82 passed in 7.41 seconds |
+| Canonical coverage command above | 0 | 82 passed in 13.82 seconds, 93.70% with 610 of 651 statements covered, terminal and XML reports generated |
+| `python -m pip check` | 0 | No broken requirements |
+| `python -m build --no-isolation` | 0 | Wheel and source distribution built |
+| `git diff --check` | 0 | No whitespace errors |
+
+Both test runs had zero failures and skips. The canonical XML report was moved to the ignored `.venv/wave3/coverage-wave4-canonical.xml` path after verification.
+
+**Final readiness decision — READY FOR COMMIT AND PR.** The follow-up changes remain uncommitted. No push, PR, merge, or Wave 5 implementation was performed.
