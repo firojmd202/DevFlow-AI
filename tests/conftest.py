@@ -11,6 +11,7 @@ import httpx
 import pytest
 import structlog
 from fastapi import FastAPI
+from sqlalchemy import event
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -89,9 +90,12 @@ def sqlite_path(tmp_path: Path) -> Path:
 
 @pytest.fixture
 async def async_engine() -> AsyncIterator[AsyncEngine]:
+    from devflow_api.database import _configure_sqlite
+
     engine = create_async_engine(
         MEMORY_URL, connect_args={"check_same_thread": False}, poolclass=StaticPool
     )
+    event.listen(engine.sync_engine, "connect", _configure_sqlite)
     try:
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
@@ -124,7 +128,16 @@ def api_app(test_settings: Settings) -> FastAPI:
 
 
 @pytest.fixture
-async def test_client(api_app: FastAPI) -> AsyncIterator[httpx.AsyncClient]:
+async def test_client(
+    api_app: FastAPI, session_factory: async_sessionmaker[AsyncSession]
+) -> AsyncIterator[httpx.AsyncClient]:
+    from devflow_api.database import get_db
+
+    async def get_test_db() -> AsyncIterator[AsyncSession]:
+        async with session_factory() as session:
+            yield session
+
+    api_app.dependency_overrides[get_db] = get_test_db
     transport = httpx.ASGITransport(app=api_app, raise_app_exceptions=False)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
         yield client

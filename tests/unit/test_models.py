@@ -136,3 +136,17 @@ def test_source_uses_aware_clock() -> None:
         "datetime.utcnow(" not in path.read_text(encoding="utf-8")
         for path in (ROOT / "src").rglob("*.py")
     )
+
+
+async def test_foreign_key_pragma_enabled_on_connection(async_engine: AsyncEngine) -> None:
+    async with async_engine.connect() as connection:
+        assert await connection.scalar(text("PRAGMA foreign_keys")) == 1
+
+
+async def test_fk_enforcement_with_wave1_tables(async_engine: AsyncEngine) -> None:
+    async with async_engine.begin() as connection:
+        await connection.execute(
+            text("CREATE TABLE child (project_id INTEGER NOT NULL REFERENCES projects(id))")
+        )
+        with pytest.raises(IntegrityError, match="FOREIGN KEY"):
+            await connection.execute(text("INSERT INTO child (project_id) VALUES (9999)"))

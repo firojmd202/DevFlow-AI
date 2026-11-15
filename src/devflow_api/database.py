@@ -22,6 +22,7 @@ def _configure_sqlite(connection: DBAPIConnection, record: ConnectionPoolEntry) 
     try:
         cursor.execute("PRAGMA journal_mode=WAL")
         cursor.fetchone()
+        cursor.execute("PRAGMA foreign_keys=ON")
     finally:
         cursor.close()
 

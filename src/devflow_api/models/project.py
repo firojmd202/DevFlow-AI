@@ -17,3 +17,4 @@ class Project(TimestampMixin, Base):
     name: Mapped[str] = mapped_column(Text)
     description: Mapped[str | None] = mapped_column(Text)
     status: Mapped[str] = mapped_column(Text, default="active", server_default="active")
+    tags_json: Mapped[str] = mapped_column(Text, default="[]", server_default="[]")

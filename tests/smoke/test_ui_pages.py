@@ -24,7 +24,7 @@ PAGES = (
 
 @pytest.mark.parametrize(
     ("index", "heading", "feature"),
-    [(index, *page) for index, page in enumerate(PAGES, 1)],
+    [(index, *page) for index, page in enumerate(PAGES, 1) if index != 2],
 )
 def test_page_renders_without_exception(index: int, heading: str, feature: str) -> None:
     at = AppTest.from_file(UI / "pages" / f"{index}_{heading}.py").run()
@@ -42,7 +42,8 @@ def test_dashboard_has_no_fabricated_metrics() -> None:
     assert not at.get("vega_lite_chart") and not at.get("plotly_chart")
 
 
-def test_navigation() -> None:
+def test_navigation(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(APIClient, "list_projects", AsyncMock(return_value=[]))
     source = ast.parse((UI / "app.py").read_text(encoding="utf-8"))
     calls = [
         node.func.attr
@@ -72,3 +73,46 @@ def test_settings_health(monkeypatch: pytest.MonkeyPatch, health: dict[str, str]
         assert at.warning[0].value == "API unavailable — start the backend to connect."
     else:
         assert at.text[0].value == "Backend: ok · version 0.1.0"
+
+
+@pytest.mark.parametrize("available", [True, False])
+def test_projects_page_renders(monkeypatch: pytest.MonkeyPatch, available: bool) -> None:
+    projects = [{"id": 1, "name": "Example project", "status": "active"}] if available else None
+    monkeypatch.setattr(APIClient, "list_projects", AsyncMock(return_value=projects))
+    create = AsyncMock(return_value=None)
+    monkeypatch.setattr(APIClient, "create_project", create)
+    at = AppTest.from_file(UI / "pages/2_Projects.py").run()
+    assert not at.exception and at.header[0].value == "Projects"
+    if not available:
+        assert at.warning[0].value.startswith("Backend unavailable")
+        return
+    assert at.dataframe
+    at.button[0].click().run()
+    assert not at.exception and at.warning[0].value == "Enter a project name."
+    create.assert_not_awaited()
+    at.text_input[0].set_value("New project")
+    at.button[0].click().run()
+    assert not at.exception and at.error[0].value == "Could not create the project."
+    create.assert_awaited_once_with("New project", None)
+
+
+def test_project_edit_and_delete(monkeypatch: pytest.MonkeyPatch) -> None:
+    projects = [{"id": 1, "name": "Example project", "status": "active"}]
+    listing = AsyncMock(return_value=projects)
+    update = AsyncMock(return_value=None)
+    delete = AsyncMock(return_value=True)
+    monkeypatch.setattr(APIClient, "list_projects", listing)
+    monkeypatch.setattr(APIClient, "update_project", update)
+    monkeypatch.setattr(APIClient, "delete_project", delete)
+    at = AppTest.from_file(UI / "pages/2_Projects.py").run()
+    at.text_input[1].set_value("Changed")
+    at.button[1].click().run()
+    assert not at.exception and at.error[0].value == "Could not update the project."
+    update.assert_awaited_once_with(1, name="Changed", description="", status="active")
+    assert at.button[2].disabled
+    at.checkbox[0].check().run()
+    assert not at.button[2].disabled
+    listing.side_effect = [projects, []]
+    at.button[2].click().run()
+    assert not at.exception
+    delete.assert_awaited_once_with(1)
