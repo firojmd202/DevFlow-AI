@@ -1,12 +1,18 @@
 # DevFlow AI — Phase 1: Functional Orchestration Design
 
-**Version:** 1.0.0
-**Status:** Draft — Awaiting Independent Review
+**Version:** 1.3.0
+**Status:** Corrected — Awaiting Final Independent Review
 **Scope:** Phase 1 — Functional Orchestration
 **Branch:** feature/phase1-specification-planning
 **Base commit:** aaaaacb703124fc31b0e757b2bf1739c4fb225c9
-**Last Updated:** 2026-11-14
-**Supersedes:** _(none — first Phase 1 design)_
+**Last Updated:** [current correction pass — implementer fills date at commit time]
+**Supersedes:** v1.2.0 (F1–F5 and D1–D4 final specification corrections applied — see .agents/tasks/phase1-final-spec-correction-report.md)
+
+**Version history:**
+- v1.0.0 — Initial specification
+- v1.1.0 — Eight independent-review findings applied
+- v1.2.0 — Five amendment-round findings applied
+- v1.3.0 — Final specification correction: F1–F5 and D1–D4 applied (FK test split, GitHubConfirmation persistence + migration 006, MCP authorization 8-step sequence, superseded guidance labelled, metadata corrected, D2 MCP binary trust statement, D4 audit event distinction)
 
 ---
 
@@ -23,9 +29,11 @@ Five rules govern every Phase 1 design decision:
 
 1. **Phase 0 contracts are immutable.** No Phase 0 router, model, schema, or adapter interface changes signature.
 2. **Stubs survive Phase 1.** Live adapters augment the registry; stub adapters remain available as fallbacks.
-3. **Approval gates are non-bypassable.** Consequential actions cannot proceed without an explicit `confirmed=True` body field or a resolved `ApprovalRequest`.
+3. **Approval gates are non-bypassable.** Consequential actions cannot proceed without a valid `GitHubConfirmation` record (GitHub branch/PR creation) or a resolved `ApprovalRequest` (workflow path). MCP consequential/unknown tool calls additionally require an `ApprovalRecord` validated by `MCPService`. The simple `confirmed: bool` field is replaced by `confirmation_id: str` referencing a `GitHubConfirmation`.
 4. **Secrets never leave `Settings`.** Live adapters read credentials only from `SecretStr` fields; `RedactSecretsProcessor` runs on every log record.
 5. **Tests are offline-first.** Live adapter tests mock `httpx.AsyncClient` and MCP subprocess interactions.
+
+**Phase 1 workflow execution boundary:** WorkflowRun tracks state for human-approved processes. Autonomous AI provider invocation from `definition_json` is NOT implemented in Phase 1 and is deferred to Phase 2. All WorkflowRun state transitions are triggered by explicit API calls to `WorkflowService.transition_run`.
 
 ---
 
@@ -94,16 +102,52 @@ Five rules govern every Phase 1 design decision:
 
 ## 3. New Database Schema
 
-### 3.1 Addition to projects table
+### 3.0 Phase 1 Migration Sequence
+
+The Phase 0 head revision is `"001_create_initial_tables"`. Phase 1 adds four migrations in this exact linear chain:
+
+**Before (Phase 0 head):**
+```
+None (base)
+  └── 001_create_initial_tables   ← Phase 0 HEAD
+```
+
+**After (Phase 1 head):**
+```
+None (base)
+  └── 001_create_initial_tables
+        └── 002_add_project_tags_column   ← Wave 1 (Task P1)
+              └── 003_add_workflow_tables   ← Wave 2 (Task W2)
+                    └── 004_add_approval_audit_tables   ← Wave 2 (Task W2)
+                          └── 005_add_repository_tables   ← Wave 2 (Task W2)
+                                └── 006_add_github_confirmations   ← Wave 5 (Task G1)
+```
+
+| Revision ID | `down_revision` | File | Wave | Tables / columns |
+|---|---|---|---|---|
+| `"001_create_initial_tables"` | `None` | `001_create_initial_tables.py` | Phase 0 | projects, learning_items, integration_configs |
+| `"002_add_project_tags_column"` | `"001_create_initial_tables"` | `002_add_project_tags_column.py` | Wave 1 | ALTER TABLE projects ADD tags_json |
+| `"003_add_workflow_tables"` | `"002_add_project_tags_column"` | `003_add_workflow_tables.py` | Wave 2 | workflows, workflow_runs |
+| `"004_add_approval_audit_tables"` | `"003_add_workflow_tables"` | `004_add_approval_audit_tables.py` | Wave 2 | approval_requests, workflow_audit_log |
+| `"005_add_repository_tables"` | `"004_add_approval_audit_tables"` | `005_add_repository_tables.py` | Wave 2 | repository_configs |
+| `"006_add_github_confirmations"` | `"005_add_repository_tables"` | `006_add_github_confirmations.py` | Wave 5 | github_confirmations |
+
+Each revision ID string in the table above is the exact string that MUST appear in the Python file as `revision = "..."`. The `down_revision` column is the exact string that MUST appear as `down_revision = "..."` in the next file.
+
+**Rationale for Wave 1 migration being 002:** Migration 002 (`tags_json` column) can be applied from the Phase 0 head independently of the workflow tables. This allows Wave 1 to pass `alembic upgrade head` without requiring Wave 2 migrations to exist first.
+
+### 3.1 Addition to projects table (migration 002)
 
 ```sql
--- Migration 005
+-- Migration 002_add_project_tags_column
+-- revision = "002_add_project_tags_column"
+-- down_revision = "001_create_initial_tables"
 ALTER TABLE projects ADD COLUMN tags_json TEXT NOT NULL DEFAULT '[]';
 ```
 
 The `Project` model gains `tags_json: Mapped[str] = mapped_column(Text, server_default="[]")`. The `ProjectResponse` schema deserialises `tags_json` via a `@model_validator` into `tags: list[str]`.
 
-### 3.2 workflows
+### 3.2 workflows (migration 003)
 
 ```sql
 CREATE TABLE workflows (
@@ -119,7 +163,9 @@ CREATE TABLE workflows (
 );
 ```
 
-### 3.3 workflow_runs
+**Note:** `definition_json` stores workflow step definitions for future Phase 2 execution. Phase 1 does not read or execute the contents of this column.
+
+### 3.3 workflow_runs (migration 003)
 
 ```sql
 CREATE TABLE workflow_runs (
@@ -138,7 +184,9 @@ CREATE TABLE workflow_runs (
 );
 ```
 
-### 3.4 approval_requests
+**WorkflowRun status constraint includes exactly:** `pending`, `running`, `waiting_approval`, `completed`, `failed`, `cancelled`. The value `paused` is NOT in this constraint. `paused` appears only in the `workflows` table status (a workflow definition may be paused), not in `workflow_runs`.
+
+### 3.4 approval_requests (migration 004)
 
 ```sql
 CREATE TABLE approval_requests (
@@ -157,7 +205,7 @@ CREATE TABLE approval_requests (
 );
 ```
 
-### 3.5 workflow_audit_log
+### 3.5 workflow_audit_log (migration 004)
 
 ```sql
 CREATE TABLE workflow_audit_log (
@@ -172,7 +220,7 @@ CREATE INDEX idx_audit_run_id ON workflow_audit_log(workflow_run_id);
 CREATE INDEX idx_audit_created ON workflow_audit_log(created_at);
 ```
 
-### 3.6 repository_configs
+### 3.6 repository_configs (migration 005)
 
 ```sql
 CREATE TABLE repository_configs (
@@ -187,6 +235,118 @@ CREATE TABLE repository_configs (
     UNIQUE (project_id, owner, repo)
 );
 ```
+
+**Note on model/migration timing:** The `repository_configs` table is created by migration `005_add_repository_tables.py` in Wave 2 (Task W2). The SQLAlchemy `RepositoryConfig` model and `RepositoryConfigRepository` are written in Wave 5 (Task G1). Alembic migrations use inline `sa.Table` definitions and do not require the ORM model to exist. The table exists in the database before the ORM model; the first code that uses the ORM interface against `repository_configs` is in Wave 5.
+
+---
+
+### 3.7a github_confirmations (migration 006 — F2 correction)
+
+Migration `006_add_github_confirmations.py` is authored in Wave 5 (Task G1), chaining from `005_add_repository_tables`. The `GitHubConfirmation` SQLAlchemy model, `GitHubConfirmationRepository`, and this migration are all Wave 5 deliverables.
+
+```sql
+CREATE TABLE github_confirmations (
+    id              TEXT     PRIMARY KEY,                 -- UUID as text
+    repo_full_name  TEXT     NOT NULL,
+    operation       TEXT     NOT NULL
+                             CHECK (operation IN ('branch_create', 'pr_create')),
+    parameters_hash TEXT     NOT NULL,                   -- SHA-256 of canonical JSON
+    actor_id        TEXT     NOT NULL,
+    workflow_run_id INTEGER  REFERENCES workflow_runs(id) ON DELETE SET NULL,
+    issued_at       DATETIME NOT NULL,
+    expires_at      DATETIME NOT NULL,
+    used_at         DATETIME                             -- NULL until first use
+);
+CREATE INDEX idx_github_confirmations_expires ON github_confirmations(expires_at);
+CREATE INDEX idx_github_confirmations_actor   ON github_confirmations(actor_id);
+```
+
+**Required revision header:**
+```python
+# 006_add_github_confirmations.py
+revision = "006_add_github_confirmations"
+down_revision = "005_add_repository_tables"
+```
+
+**GitHubConfirmation SQLAlchemy model:**
+```python
+# src/devflow_api/models/github_confirmation.py
+class GitHubConfirmation(Base):
+    __tablename__ = "github_confirmations"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)          # UUID
+    repo_full_name: Mapped[str] = mapped_column(Text, nullable=False)
+    operation: Mapped[str] = mapped_column(Text, nullable=False)
+    parameters_hash: Mapped[str] = mapped_column(Text, nullable=False)  # SHA-256
+    actor_id: Mapped[str] = mapped_column(Text, nullable=False)
+    workflow_run_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("workflow_runs.id", ondelete="SET NULL"), nullable=True
+    )
+    issued_at: Mapped[datetime] = mapped_column(UTCDateTime, nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(UTCDateTime, nullable=False)
+    used_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
+```
+
+**GitHubConfirmationRepository (F2 correction):**
+```python
+# src/devflow_api/repositories/github_confirmation.py
+class GitHubConfirmationRepository(BaseRepository[GitHubConfirmation]):
+    async def get_by_id(self, confirmation_id: str) -> GitHubConfirmation | None: ...
+
+    async def create(
+        self,
+        id: str,
+        repo_full_name: str,
+        operation: Literal["branch_create", "pr_create"],
+        parameters_hash: str,
+        actor_id: str,
+        workflow_run_id: int | None,
+        issued_at: datetime,
+        expires_at: datetime,
+    ) -> GitHubConfirmation: ...
+
+    async def consume_atomic(self, confirmation_id: str, now: datetime) -> GitHubConfirmation:
+        """
+        Atomically sets used_at = now on the first call.
+        Raises ConfirmationAlreadyUsedError if used_at is already set.
+        Uses optimistic locking: UPDATE ... WHERE used_at IS NULL.
+        Returns updated record.
+        """
+```
+
+**Persistence rationale (F2):** `GitHubConfirmation` records are persisted to SQLite (not held in-memory) so that:
+1. Confirmation records survive service restarts — a confirmation issued before a restart can still be consumed after.
+2. Concurrent duplicate-consumption is prevented via atomic `UPDATE WHERE used_at IS NULL` (not possible with in-memory maps).
+3. Audit trail is complete — issued and used timestamps are durable.
+
+---
+
+### 3.7 SQLite Foreign-Key Enforcement
+
+SQLite does not enforce foreign key constraints unless `PRAGMA foreign_keys=ON` is executed on each connection after it is opened. Without this PRAGMA, `ON DELETE CASCADE` and `ON DELETE SET NULL` are silently ignored, making every FK-dependent integrity guarantee in §3.2–§3.6 non-operational.
+
+**Implementation:** Register a `'connect'` SQLAlchemy event on the async engine in `src/devflow_api/database.py`:
+
+```python
+from sqlalchemy import event
+from sqlalchemy.engine.interfaces import DBAPIConnection
+from sqlalchemy.pool import ConnectionPoolEntry
+
+@event.listens_for(engine.sync_engine, "connect")
+def configure_sqlite_pragmas(
+    connection: DBAPIConnection, record: ConnectionPoolEntry
+) -> None:
+    cursor = connection.cursor()
+    try:
+        cursor.execute("PRAGMA journal_mode=WAL")
+        cursor.fetchone()
+        cursor.execute("PRAGMA foreign_keys=ON")
+        cursor.fetchone()
+    finally:
+        cursor.close()
+```
+
+**Note on `alembic/env.py`:** The existing `alembic/env.py` already registers a `'connect'` event for `PRAGMA journal_mode=WAL`. During implementation, `PRAGMA foreign_keys=ON` must also be added to that same handler in `alembic/env.py`. The `alembic/env.py` file is out of scope for this specification-correction step and will be updated by the implementer alongside `src/devflow_api/database.py`.
 
 ---
 
@@ -279,7 +439,11 @@ class WorkflowService:
     ) -> None: ...
 
     async def create_run(self, workflow_id: int) -> WorkflowRun:
-        """Creates a WorkflowRun with status=pending and logs run_created."""
+        """
+        Creates a WorkflowRun with status=pending.
+        Logs run_created audit event with actor="system".
+        Does NOT read definition_json or execute any steps.
+        """
 
     async def transition_run(
         self,
@@ -288,7 +452,10 @@ class WorkflowService:
         actor: str,
         payload: dict[str, object] | None = None,
     ) -> WorkflowRun:
-        """Transitions run status and logs run_status_changed."""
+        """
+        Transitions run status and logs run_status_changed.
+        All transitions are triggered by explicit API calls, not autonomous execution.
+        """
 ```
 
 ### 5.2 ApprovalService (`services/approval.py`)
@@ -309,7 +476,10 @@ class ApprovalService:
         action_description: str,
         payload: dict[str, object] | None = None,
     ) -> ApprovalRequest:
-        """Creates ApprovalRequest and transitions run to waiting_approval."""
+        """
+        Creates ApprovalRequest, transitions run to waiting_approval,
+        and logs approval_requested audit event with actor="system".
+        """
 
     async def resolve(
         self,
@@ -322,7 +492,7 @@ class ApprovalService:
         - approved → run transitions to running
         - rejected → run transitions to cancelled
         Raises ApprovalAlreadyResolvedError if already resolved.
-        Logs approval_resolved audit event.
+        Logs approval_resolved audit event with actor="user".
         """
 ```
 
@@ -430,10 +600,13 @@ class MCPClient:
         """
         1. Resolve server config by name (raises MCPServerNotFoundError if absent).
         2. Check tool against allowed_tools (raises MCPPermissionError if denied).
+           Note: allowed_tools is a configuration-time permission control, not human approval.
         3. Interpolate env secrets (raises MCPSecretResolutionError if unresolvable).
-        4. Launch subprocess via MCP SDK stdio_client.
+           Only SecretStr Settings fields may be interpolated.
+        4. Launch subprocess via MCP SDK stdio_client with explicit env (not inheriting parent).
         5. Call tool with timeout_seconds.
-        6. Terminate subprocess in finally block.
+        6. On completion/timeout: terminate subprocess (SIGTERM, then SIGKILL after 5s grace)
+           in finally block.
         7. Log invocation (keys only, not values).
         """
 ```
@@ -470,7 +643,167 @@ class MCPPermissionError(DevFlowError):
 
 class MCPSecretResolutionError(DevFlowError):
     key_name: str
+
+class MCPApprovalRequiredError(DevFlowError):
+    server_name: str
+    tool_name: str
+    classification: str   # "consequential" | "unknown"
+
+class MCPApprovalExpiredError(DevFlowError):
+    server_name: str
+    tool_name: str
 ```
+
+---
+
+### 7.5 MCPService — Approval Gate Layer
+
+`MCPService` sits between routers/adapters and `MCPClient`. It owns the approval gate and emits the seven MCP audit events. No code path may call `MCPClient.call_tool` directly; all MCP tool invocations go through `MCPService.invoke_tool`.
+
+**No-bypass rule:** No adapter, router, or Streamlit handler may import or instantiate `MCPClient` directly. All MCP invocations MUST go through `MCPService.invoke_tool`. This rule is enforced by architecture convention and verified by `test_no_direct_mcp_client_bypass`.
+
+```python
+# src/devflow_api/services/mcp_service.py
+
+class MCPService:
+    def __init__(
+        self,
+        mcp_client: MCPClient,
+        audit_repo: AuditLogRepository,
+        approval_request_repo: ApprovalRequestRepository,
+    ) -> None: ...
+
+    async def invoke_tool(
+        self,
+        server_name: str,
+        tool_name: str,
+        arguments: dict[str, object],
+        actor_id: str,
+        workflow_run_id: int | None = None,
+        approval_request_id: str | None = None,
+    ) -> MCPToolResult:
+        """
+        Mandatory 8-step authorization sequence (F1 correction):
+        1. Verify MCP server is configured and enabled (raises MCPServerNotFoundError if absent).
+        2. Verify tool is on the allow-list (REQ-M1.4). Raises MCPPermissionError if denied.
+        3. Classify tool as read_only, consequential, or unknown.
+        4. Default unknown → consequential (deny-by-default policy).
+        5. For consequential/unknown tools: retrieve ApprovalRequest from
+           ApprovalRequestRepository by approval_request_id (REQ-M1.7).
+           - If approval_request_id is None or record not found:
+             log mcp_approval_missing, raise MCPApprovalRequiredError.
+           - MCPService retrieves the record internally — the caller MUST NOT
+             pass a pre-built approval object.
+        6. Validate retrieved ApprovalRequest:
+           a. status MUST be APPROVED; otherwise raise MCPApprovalRequiredError.
+           b. expires_at MUST be in the future; if expired:
+              log mcp_approval_expired, raise MCPApprovalExpiredError.
+              IMPORTANT: mcp_approval_expired is NOT mcp_approval_denied.
+              Expiry is not a human rejection.
+           c. mcp_server_id, tool_name, arguments_hash, and actor_id MUST match
+              the current invocation; mismatch → MCPApprovalRequiredError.
+           d. status MUST NOT be CONSUMED (replay prevention).
+           Atomically set status = CONSUMED, consumed_at = now(UTC) via
+           ApprovalRequestRepository.consume_atomic in a single DB transaction.
+           Log mcp_approval_granted.
+        7. Execute: call MCPClient.call_tool.
+           - On success: log mcp_tool_invoked.
+           - On exception: log mcp_tool_failed, re-raise.
+        8. Record all audit events without leaking credentials or argument values.
+
+        Note: allow-list alone is NOT sufficient for consequential tools. Both checks are additive
+        and sequential: allow-list check runs first; then classification + approval gate.
+        Note: read_only tools proceed without approval_request_id (subject to allow-list only).
+        """
+```
+
+**ApprovalRequest model (MCP-specific, persisted to DB — F1 correction):**
+```python
+# Pydantic model representing the persisted ApprovalRequest record.
+# This is the record MCPService retrieves from ApprovalRequestRepository.
+# Fields:
+#   id              — UUID (primary key, supplied as approval_request_id by caller)
+#   mcp_server_id   — str (must match the target MCP server)
+#   tool_name       — str (must match the tool being invoked)
+#   arguments_hash  — str (SHA-256 of JSON-serialised arguments; must match)
+#   actor_id        — str (must match actor_id in the invoke_tool call)
+#   workflow_run_id — int | None (nullable, for audit linkage)
+#   status          — Literal["PENDING", "APPROVED", "REJECTED", "EXPIRED", "CONSUMED"]
+#   created_at      — datetime (UTCDateTime)
+#   expires_at      — datetime (UTCDateTime; must be in the future for the call to proceed)
+#   consumed_at     — datetime | None (UTCDateTime; set atomically on first successful consumption)
+```
+
+**ApprovalRequestRepository:**
+```python
+# src/devflow_api/repositories/approval_request.py
+
+class ApprovalRequestRepository(BaseRepository[ApprovalRequest]):
+    async def get_by_id(self, approval_request_id: str) -> ApprovalRequest | None:
+        """Retrieve an ApprovalRequest by its UUID. Returns None if not found."""
+
+    async def create(
+        self,
+        id: str,
+        mcp_server_id: str,
+        tool_name: str,
+        arguments_hash: str,
+        actor_id: str,
+        workflow_run_id: int | None,
+        expires_at: datetime,
+    ) -> ApprovalRequest:
+        """Persist a new ApprovalRequest with status=PENDING."""
+
+    async def consume_atomic(self, approval_request_id: str, now: datetime) -> ApprovalRequest:
+        """
+        Atomically set status = CONSUMED and consumed_at = now on the record
+        where id = approval_request_id AND status = APPROVED.
+        Uses UPDATE ... WHERE status = 'APPROVED' AND id = ?.
+        Raises MCPApprovalRequiredError if 0 rows updated (already consumed or not found).
+        Returns the updated record.
+        """
+```
+
+**Tool classification:** `MCPServerConfig` gains an optional `tool_classifications: dict[str, Literal["read_only", "consequential", "unknown"]]` field. Any tool not listed defaults to `"unknown"`. Read-only tools may proceed without an `approval_request_id`.
+
+**Additive sequential checks (both must pass):**
+1. Allow-list check (`MCPPermissionError` if denied) — from REQ-M1.4.
+2. Approval gate check (`MCPApprovalRequiredError` if consequential/unknown without a valid, persisted, unconsumed `ApprovalRequest` retrieved by `approval_request_id`) — from REQ-M1.7.
+
+**Audit events emitted by MCPService (D4 correction — full set):**
+
+| Event type | When | Distinct from |
+|---|---|---|
+| `mcp_approval_requested` | Before raising `MCPApprovalRequiredError` when a consequential/unknown tool is invoked | — |
+| `mcp_approval_granted` | After retrieving, validating, and atomically consuming the `ApprovalRequest` for a tool call | Distinct from `mcp_approval_requested` |
+| `mcp_approval_denied` | When an `ApprovalRequest` for an MCP tool is **explicitly rejected** by a human approver | NOT emitted on expiry |
+| `mcp_approval_expired` | When `ApprovalRequest.expires_at` is in the past — TTL elapsed before use | NOT `mcp_approval_denied`; expiry is not a human rejection |
+| `mcp_approval_missing` | When no `ApprovalRequest` is found (absent `approval_request_id` or record not in DB) for a consequential/unknown tool | NOT `mcp_approval_requested`; missing is a different error path |
+| `mcp_tool_invoked` | After `MCPClient.call_tool` returns without exception | — |
+| `mcp_tool_failed` | After `MCPClient.call_tool` raises any exception | — |
+
+**New file:** `ApprovalRequestRepository` lives at `src/devflow_api/repositories/approval_request.py`. It is added to the new-file layout in §13 and to the Wave 4, Task I4 deliverables.
+
+---
+
+### 7.6 MCP SDK Dependency Management
+
+**Declared version range:** `mcp>=1.0,<2.0` in `requirements/base.txt`. The `mcp` package was not present in `pyproject.toml` or `requirements/base.txt` as of base commit `aaaaacb`. The implementer MUST check `pyproject.toml` first at implementation time (Wave 4, Task I4); if a different `mcp` version is already declared there, that version takes precedence and REQ-M1.8 must be updated to reflect the actual constraint. The operative constraint as of this specification is `mcp>=1.0,<2.0`.
+
+**Trust statement (D2 — exact statement required by Final Specification Correction):**
+"For Phase 1, operator-configured MCP server binaries are trusted within the documented local single-user threat model. Environment-variable scoping is not an OS-level sandbox. Untrusted MCP binaries must not be executed. OS-level sandboxing (seccomp, namespaces, AppArmor) is deferred to a future phase."
+
+**MCP binary trust elaboration:** MCP server binaries configured in `MCPServerConfig.command` are trusted by the operator who configured them. DevFlow AI does not verify binary signatures or hash values. The operator is responsible for ensuring the configured binary is trustworthy. The security boundary is environment-variable scoping and the allow-list defined in `MCPServerConfig.allowed_tools`. Do NOT claim that environment-variable scoping provides OS-level isolation — it does not.
+
+**Reproducible locking:** A lockfile (`requirements/requirements.lock` or equivalent) MUST be generated by `uv lock` or `pip-compile` and committed. CI installs from the lockfile.
+
+**Upgrade procedure:**
+1. Bump the constraint in `requirements/base.txt`.
+2. Regenerate the lockfile (`uv lock` or `pip-compile`).
+3. Run the full test suite including MCP integration tests.
+4. If the MCP SDK introduces behaviour changes visible to callers, update this spec.
+
+**Offline testing:** All MCP unit and integration tests MUST mock the subprocess. No live MCP server is required in CI. The `mcp` SDK's `stdio_client` is not called in tests; only the Python interface is imported for type-checking purposes.
 
 ---
 
@@ -514,16 +847,45 @@ class RepositoryService:
         repo_config_repo: RepositoryConfigRepository,
         audit_repo: AuditLogRepository,
         github_adapter: GitHubAdapter | GitHubStubAdapter,
+        confirmation_repo: GitHubConfirmationRepository,
     ) -> None: ...
+
+    async def issue_confirmation(
+        self,
+        repo_full_name: str,
+        operation: Literal["branch_create", "pr_create"],
+        parameters: dict[str, object],
+        actor_id: str,
+        workflow_run_id: int | None = None,
+    ) -> GitHubConfirmation:
+        """
+        Creates and persists a GitHubConfirmation record.
+        Sets: parameters_hash = SHA-256(canonical JSON of parameters),
+              issued_at = now(UTC), expires_at = now(UTC) + TTL (default 10 minutes),
+              used_at = None.
+        Logs github_confirmation_issued audit event.
+        Returns the GitHubConfirmation record (including its id).
+        """
 
     async def create_branch(
         self,
         repo_config_id: int,
         name: str,
         base_ref: str,
-        confirmed: bool,
+        confirmation_id: str,
+        actor_id: str,
     ) -> BranchSummary:
-        """Raises ConfirmationRequiredError if confirmed=False."""
+        """
+        1. Load GitHubConfirmation by confirmation_id. Raises ConfirmationNotFoundError if absent.
+        2. Validate operation == "branch_create". Raises ConfirmationMismatchError if wrong.
+        3. Validate parameters_hash matches SHA-256 of {name, base_ref, repo_config_id}.
+           Raises ConfirmationMismatchError (HTTP 422, code CONFIRMATION_MISMATCH) if mismatch.
+        4. Validate expires_at > now(UTC). Raises ConfirmationExpiredError (HTTP 422, code CONFIRMATION_EXPIRED) if expired.
+        5. Validate used_at is None. Raises ConfirmationAlreadyUsedError (HTTP 409) if used.
+        6. Set used_at = now(UTC). Logs github_action_authorized.
+        7. Calls GitHubAdapter.create_branch. Logs github_action_executed with actor=actor_id.
+        8. Logs branch_created audit event with actor="user".
+        """
 
     async def create_pull_request(
         self,
@@ -532,55 +894,118 @@ class RepositoryService:
         head: str,
         base: str,
         body: str,
-        confirmed: bool,
+        confirmation_id: str,
+        actor_id: str,
     ) -> PullRequestSummary:
-        """Raises ConfirmationRequiredError if confirmed=False. No merge support."""
+        """
+        Same confirmation validation as create_branch, with operation == "pr_create".
+        No merge support.
+        Logs pr_created audit event with actor="user".
+        Logs github_action_authorized and github_action_executed.
+        """
 ```
+
+**GitHubConfirmation record (F2 correction — SQLAlchemy ORM model, persisted to SQLite):**
+```python
+# src/devflow_api/models/github_confirmation.py  (SQLAlchemy model — see §3.7a for full definition)
+class GitHubConfirmation(Base):
+    __tablename__ = "github_confirmations"
+    id: Mapped[str]                       # UUID as text, primary key
+    repo_full_name: Mapped[str]
+    operation: Mapped[str]                # "branch_create" | "pr_create"
+    parameters_hash: Mapped[str]          # SHA-256 of canonical JSON
+    actor_id: Mapped[str]
+    workflow_run_id: Mapped[int | None]   # nullable FK → workflow_runs.id
+    issued_at: Mapped[datetime]
+    expires_at: Mapped[datetime]          # default: issued_at + 10 minutes
+    used_at: Mapped[datetime | None]      # None until first use; set atomically
+```
+
+**SUPERSEDED — see §3.7a:** The earlier design stub defined `GitHubConfirmation` as a Pydantic `BaseModel` for in-memory use. This is superseded by the SQLAlchemy model above with migration 006. In-memory storage is NOT acceptable (F2 correction). The persistence requirement ensures restart recovery and concurrent duplicate-consumption prevention.
+
+**Confirmation endpoint:** `POST /api/v1/github-confirmations` → issues a `GitHubConfirmation`, returns `{"id": "...", "expires_at": "..."}`. The client then includes `{"confirmation_id": "<id>", ...}` in the branch/PR creation request body.
+
+**Rejection cases and HTTP codes:**
+- No `confirmation_id` supplied → HTTP 422, code `CONFIRMATION_REQUIRED`
+- `confirmation_id` not found → HTTP 404, code `CONFIRMATION_NOT_FOUND`
+- `operation` or `parameters_hash` mismatch → HTTP 422, code `CONFIRMATION_MISMATCH`
+- `expires_at` in the past → HTTP 422, code `CONFIRMATION_EXPIRED`
+- `used_at` already set → HTTP 409, code `CONFIRMATION_ALREADY_USED`
+
+**Audit events logged by RepositoryService:**
+
+| Event type | Trigger |
+|---|---|
+| `github_confirmation_issued` | `issue_confirmation` |
+| `github_action_authorized` | After confirmation validated, before adapter call |
+| `github_action_executed` | After adapter call succeeds |
+| `github_action_rejected` | When any confirmation validation fails |
+| `branch_created` | After `create_branch` succeeds |
+| `pr_created` | After `create_pull_request` succeeds |
 
 ---
 
-## 9. Workflow State Machine
+## 9. WorkflowRun State Machine
+
+### 9.1 WorkflowRun states
+
+| State | Meaning |
+|---|---|
+| `pending` | Record created; no work started. Run waits for an explicit `transition_run` call to `running`. Created by `WorkflowService.create_run`. |
+| `running` | Active processing in progress (steps being executed). Only state from which `completed`, `failed`, `waiting_approval`, or `cancelled` can be reached. |
+| `waiting_approval` | An approval gate was reached. Run is paused at this gate until an `ApprovalRequest` is resolved by a human. |
+| `completed` | All steps finished successfully. Terminal state. `completed_at` is set. |
+| `failed` | An unhandled error occurred. Terminal state. `error_message` is set. `completed_at` is set. |
+| `cancelled` | Cancelled by user action from `running` state, or by an `ApprovalRequest` being rejected. Terminal state. |
+
+**States NOT present in WorkflowRun:** `paused` (this is a `Workflow` definition status only, not a run status). `created` (the initial state at record creation is `pending`). `approved` (this is an `ApprovalRequest.status` value that causes the run to transition from `waiting_approval` back to `running`, not a run status itself).
+
+### 9.2 WorkflowRun valid transitions
 
 ```
                      ┌─────────┐
-                     │  draft  │
+                     │  draft  │  (Workflow status — not WorkflowRun)
                      └────┬────┘
                           │ activate
                      ┌────▼────┐
-                  ┌──│  active │──┐
-                  │  └────┬────┘  │
-            pause │       │ run   │ fail
-                  │  ┌────▼─────┐ │
-                  │  │ running  │ │
-                  │  └──┬───┬───┘ │
-                  │     │   │     │
-          waiting │     │   │ complete/fail
-              appr│     │   └──────────────────┐
-                  │  ┌──▼──────────────────┐    │
-                  │  │  waiting_approval   │    │
-                  │  └──┬──────────────────┘    │
-                  │     │ approved/rejected      │
-                  │  ┌──▼────────────────────┐  │
-                  └─▶│  paused               │  │
-                     └───────────────────────┘  │
-                                                 │
-                     ┌──────────┐  ┌────────────▼┐
-                     │cancelled │  │  completed   │
-                     └──────────┘  └─────────────┘
+                     │  active │  (Workflow status — not WorkflowRun)
+                     └─────────┘
+
+   WorkflowRun transitions:
+
+   [pending] ──transition_run──▶ [running]
+                                      │
+                              ┌───────┼──────────┬────────────┐
+                        appr  │       │complete  │fail        │cancel
+                        gate  │       │          │            │
+                              ▼       ▼          ▼            ▼
+                   [waiting_approval] [completed] [failed] [cancelled]
+                              │
+                     approved │ rejected
+                              │         │
+                              ▼         ▼
+                           [running] [cancelled]
 ```
 
-**WorkflowRun valid transitions:**
+**WorkflowRun valid transitions table:**
+
 | From | To | Trigger |
 |---|---|---|
-| `pending` | `running` | `WorkflowService.transition_run` |
-| `running` | `waiting_approval` | approval gate reached |
-| `running` | `completed` | all steps complete |
-| `running` | `failed` | step raises exception |
-| `waiting_approval` | `running` | approval approved |
-| `waiting_approval` | `cancelled` | approval rejected |
-| `running` | `cancelled` | user cancels |
+| `pending` | `running` | `WorkflowService.transition_run(run_id, "running", actor)` |
+| `running` | `waiting_approval` | `ApprovalService.request_approval(run_id, ...)` |
+| `running` | `completed` | `WorkflowService.transition_run(run_id, "completed", actor)` |
+| `running` | `failed` | `WorkflowService.transition_run(run_id, "failed", actor)` |
+| `running` | `cancelled` | `WorkflowService.transition_run(run_id, "cancelled", actor)` |
+| `waiting_approval` | `running` | `ApprovalService.resolve(id, "approved", ...)` |
+| `waiting_approval` | `cancelled` | `ApprovalService.resolve(id, "rejected", ...)` |
 
-Invalid transitions return `HTTP 422` with `code = "INVALID_STATUS_TRANSITION"`.
+All other transitions are invalid. Invalid transitions raise `InvalidStatusTransitionError` → HTTP 422 with `code = "INVALID_STATUS_TRANSITION"`.
+
+**Phase 1 execution boundary:** `WorkflowService.transition_run` performs the state transition and writes an audit log entry. It does NOT read `definition_json` or dispatch step execution. All transitions in Phase 1 are triggered by explicit API calls, not autonomous processing.
+
+### 9.3 Workflow definition status (separate from WorkflowRun)
+
+The `Workflow` model (the definition, not a run) has status: `draft | active | paused | completed | failed`. These are definition lifecycle states and are separate from WorkflowRun execution states. A paused `Workflow` definition means no new runs should be started; it does not affect already-running `WorkflowRun` records.
 
 ---
 
@@ -597,6 +1022,8 @@ GET    /api/v1/projects/{id}                               → ProjectResponse  
 PUT    /api/v1/projects/{id}                               → ProjectResponse        200 | 404 | 422
 DELETE /api/v1/projects/{id}                               → 204 | 404
 ```
+
+**PUT null semantics:** `ProjectUpdate` fields set to `null` are treated as absent (skipped). There is no way to clear an existing field value via PUT in Phase 1.
 
 ### 10.2 Workflows (new)
 
@@ -632,13 +1059,19 @@ DELETE /api/v1/repositories/{id}                           → 204 | 404
 GET    /api/v1/repositories/{id}/branches                  → list[BranchSummary]       200 | 403 | 502
 GET    /api/v1/repositories/{id}/branches/{branch}/status  → BranchStatus              200 | 403 | 404 | 502
 GET    /api/v1/repositories/{id}/branches/{branch}/ci      → list[CheckRunSummary]     200 | 403 | 404 | 502
-POST   /api/v1/repositories/{id}/branches                  → BranchSummary            201 | 403 | 409 | 422 | 502
+POST   /api/v1/repositories/{id}/branches                  → BranchSummary            201 | 403 | 404 | 409 | 422 | 502
 GET    /api/v1/repositories/{id}/pull-requests             → list[PullRequestSummary]  200 | 403 | 502
-POST   /api/v1/repositories/{id}/pull-requests             → PullRequestSummary        201 | 403 | 422 | 502
+POST   /api/v1/repositories/{id}/pull-requests             → PullRequestSummary        201 | 403 | 404 | 422 | 502
 GET    /api/v1/repositories/{id}/pull-requests/{pr_number} → PullRequestSummary        200 | 403 | 404 | 502
+POST   /api/v1/github-confirmations                        → GitHubConfirmationResponse 201 | 422
+
 ```
 
-**No `/merge` endpoint exists.**
+`POST /api/v1/github-confirmations` body: `{"repo_full_name": str, "operation": "branch_create" | "pr_create", "parameters": dict}`. Response: `{"id": str, "expires_at": datetime}`.
+
+`POST /api/v1/repositories/{id}/branches` body: `{"name": str, "base_ref": str, "confirmation_id": str}` — the `confirmed: bool` field is replaced.
+
+`POST /api/v1/repositories/{id}/pull-requests` body: `{"title": str, "head": str, "base": str, "body": str, "confirmation_id": str}` — the `confirmed: bool` field is replaced.
 
 ### 10.5 Integrations (extended)
 
@@ -793,16 +1226,19 @@ src/devflow_api/
         repository.py        (new — RepositoryConfig)
 
     repositories/
-        project.py           (extended — list_filtered, update_tags)
-        workflow.py          (new — WorkflowRepository, WorkflowRunRepository)
-        approval.py          (new — ApprovalRepository, AuditLogRepository)
-        repository_config.py (new — RepositoryConfigRepository)
+        project.py              (extended — list_filtered, update_tags)
+        workflow.py             (new — WorkflowRepository, WorkflowRunRepository)
+        approval.py             (new — ApprovalRepository, AuditLogRepository)
+        approval_request.py     (new — ApprovalRequestRepository; get_by_id, create, consume_atomic)
+        repository_config.py    (new — RepositoryConfigRepository)
+        github_confirmation.py  (new — GitHubConfirmationRepository)
 
     services/
         project.py           (new — ProjectService)
         workflow.py          (new — WorkflowService)
         approval.py          (new — ApprovalService)
-        repository.py        (new — RepositoryService)
+        repository.py        (new — RepositoryService; owns GitHubConfirmation gate)
+        mcp_service.py       (new — MCPService; owns MCP approval gate; depends on ApprovalRequestRepository)
 
     routers/
         projects.py          (replace stub with live DB calls)
@@ -829,10 +1265,10 @@ src/devflow_api/
         registry.py          (extended — get_live, register_live)
 
 alembic/versions/
-    002_add_workflow_tables.py     (new)
-    003_add_approval_audit_tables.py (new)
-    004_add_repository_tables.py   (new)
-    005_add_project_tags_column.py (new)
+    002_add_project_tags_column.py    (new — Wave 1, Task P1)
+    003_add_workflow_tables.py        (new — Wave 2, Task W2)
+    004_add_approval_audit_tables.py  (new — Wave 2, Task W2)
+    005_add_repository_tables.py      (new — Wave 2, Task W2)
 
 src/devflow_ui/
     api_client.py            (extended — all Phase 1 methods)
@@ -850,6 +1286,7 @@ tests/
         test_workflow_service.py     (new)
         test_approval_service.py     (new)
         test_repository_service.py   (new)
+        test_mcp_service.py          (new — MCPService approval gate tests)
         test_live_adapters.py        (new — mocked httpx)
         test_mcp_client.py           (new — mocked subprocess)
         test_github_router.py        (new)
@@ -868,22 +1305,35 @@ tests/
 
 ### 14.1 Confirmation gate pattern
 
-All destructive or external actions use this pattern in the router:
+GitHub branch and PR creation use a two-step confirmation pattern. First, the client obtains a `GitHubConfirmation` record by calling `POST /api/v1/github-confirmations`. Then it submits that `confirmation_id` in the creation request:
 
 ```python
+# Step 1 — issue confirmation (client calls this first)
+# POST /api/v1/github-confirmations
+# Body: {"repo_full_name": "owner/repo", "operation": "branch_create",
+#        "parameters": {"name": "feature/x", "base_ref": "develop", "repo_config_id": 1}}
+# Response: {"id": "<uuid>", "expires_at": "2025-01-21T10:10:00+00:00"}
+
+# Step 2 — create branch with confirmation_id
 @router.post("/{id}/branches")
 async def create_branch(
     id: int,
     body: CreateBranchRequest,
-    # ...
+    # body.confirmation_id: str (required)
+    # body.name: str
+    # body.base_ref: str
 ) -> BranchSummary:
-    if not body.confirmed:
-        raise HTTPException(
-            status_code=422,
-            detail={"error": "Branch creation requires explicit confirmation", "code": "CONFIRMATION_REQUIRED"},
-        )
-    return await repo_service.create_branch(id, body.name, body.base_ref, confirmed=True)
+    return await repo_service.create_branch(
+        id, body.name, body.base_ref,
+        confirmation_id=body.confirmation_id,
+        actor_id="user",
+    )
+    # RepositoryService validates the GitHubConfirmation record before calling GitHubAdapter
 ```
+
+**The simple `confirmed: bool` field is REPLACED by `confirmation_id: str`.** A boolean flag alone is not accepted for branch or PR creation. The `GitHubConfirmation` record IS the confirmation; it binds the specific repository, operation, and parameters to a time-limited single-use token.
+
+**Authorization model:** Having `GITHUB_TOKEN` configured is an authentication prerequisite (it allows the GitHub API call to authenticate), not authorization. The `GitHubConfirmation` record is the authorization gate.
 
 ### 14.2 Approval gate pattern
 
@@ -918,19 +1368,38 @@ structlog — RedactSecretsProcessor strips all secret values before emission
 
 ### 14.4 MCP subprocess isolation
 
+**Isolation boundary (D2 correction):** Phase 1 provides environment-variable scoping only. The launched subprocess receives an explicitly constructed `env` dict. It does NOT inherit the parent process environment (`env=None` is never passed to `create_subprocess_exec`). This is Python-level environment variable isolation only. OS-level sandbox isolation (seccomp, namespaces, cgroups, AppArmor) is NOT implemented in Phase 1 and is deferred to a future phase.
+
+**D2 exact statement:** "For Phase 1, operator-configured MCP server binaries are trusted within the documented local single-user threat model. Environment-variable scoping is not an OS-level sandbox. Untrusted MCP binaries must not be executed. OS-level sandboxing (seccomp, namespaces, AppArmor) is deferred to a future phase."
+
+**Operator trust:** MCP server binaries in `MCPServerConfig.command` are trusted by the operator who configured them. DevFlow AI does not verify binary signatures.
+
+**Secret interpolation:** Only `Settings` attributes that are `SecretStr` fields may be referenced via `${VAR_NAME}` in `MCPServerConfig.env`. Referencing a non-existent or non-secret attribute raises `MCPSecretResolutionError` before process launch.
+
+**Termination sequence:** On timeout or completion: SIGTERM is sent first; if the process has not exited after a 5-second grace period, SIGKILL is sent. All subprocess interactions are wrapped in `try/finally` to guarantee termination.
+
 ```python
 resolved_env = {
-    k: _resolve_secret(v, settings)   # interpolates ${SECRET_NAME}
+    k: _resolve_secret(v, settings)   # interpolates ${SECRET_NAME} from SecretStr fields only
     for k, v in config.env.items()
 }
-# Launch with explicit env, not inheriting parent process environment
+# Launch with explicit env dict — does NOT inherit parent process environment
 proc = await asyncio.create_subprocess_exec(
     *config.command, *config.args,
-    env=resolved_env,                  # explicit, isolated env
+    env=resolved_env,                  # explicit env, not env=None
     stdin=asyncio.subprocess.PIPE,
     stdout=asyncio.subprocess.PIPE,
     stderr=asyncio.subprocess.PIPE,
 )
+try:
+    result = await asyncio.wait_for(proc.communicate(input=request_bytes), timeout=config.timeout_seconds)
+finally:
+    if proc.returncode is None:
+        proc.terminate()
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=5.0)
+        except asyncio.TimeoutError:
+            proc.kill()
 ```
 
 ---
@@ -944,11 +1413,17 @@ Phase 0 `add_error_handlers` is extended with three new handlers:
 | `IntegrationExecutionError` | 502 | `INTEGRATION_ERROR` |
 | `MissingCredentialError` | 403 | `MISSING_CREDENTIAL` |
 | `ConfirmationRequiredError` | 422 | `CONFIRMATION_REQUIRED` |
+| `ConfirmationExpiredError` | 422 | `CONFIRMATION_EXPIRED` |
+| `ConfirmationMismatchError` | 422 | `CONFIRMATION_MISMATCH` |
+| `ConfirmationAlreadyUsedError` | 409 | `CONFIRMATION_ALREADY_USED` |
+| `ConfirmationNotFoundError` | 404 | `CONFIRMATION_NOT_FOUND` |
 | `ApprovalAlreadyResolvedError` | 409 | `APPROVAL_ALREADY_RESOLVED` |
 | `InvalidStatusTransitionError` | 422 | `INVALID_STATUS_TRANSITION` |
 | `MCPServerNotFoundError` | 404 | `MCP_SERVER_NOT_FOUND` |
 | `MCPPermissionError` | 403 | `MCP_PERMISSION_DENIED` |
 | `MCPTimeoutError` | 504 | `MCP_TIMEOUT` |
+| `MCPApprovalRequiredError` | 403 | `MCP_APPROVAL_REQUIRED` |
+| `MCPApprovalExpiredError` | 422 | `MCP_APPROVAL_EXPIRED` |
 
 ---
 
@@ -957,6 +1432,7 @@ Phase 0 `add_error_handlers` is extended with three new handlers:
 Every service operation emits a structured log entry. Structlog context variables carry `request_id` (from Phase 0 middleware) through all nested calls.
 
 Key log events:
+
 | Event | Level | Fields |
 |---|---|---|
 | Project created | INFO | `project_id`, `name` |
@@ -968,6 +1444,28 @@ Key log events:
 | MCP tool call | INFO | `server`, `tool`, `arg_keys`, `duration_ms`, `success` |
 | Credential missing | WARNING | `integration`, `credential_key` (NOT value) |
 | External HTTP error | WARNING | `integration`, `status_code`, `url` (NOT body) |
+
+**Required audit event types (persisted to `workflow_audit_log`):**
+
+| Event type | Trigger | Actor |
+|---|---|---|
+| `run_created` | `WorkflowService.create_run` | `"system"` |
+| `run_status_changed` | `WorkflowService.transition_run` | passed `actor` param |
+| `approval_requested` | `ApprovalService.request_approval` | `"system"` |
+| `approval_resolved` | `ApprovalService.resolve` | `"user"` |
+| `branch_created` | `RepositoryService.create_branch` | `"user"` |
+| `pr_created` | `RepositoryService.create_pull_request` | `"user"` |
+| `github_confirmation_issued` | `RepositoryService.issue_confirmation` | `"user"` |
+| `github_action_authorized` | `RepositoryService` after confirmation validated | `"user"` |
+| `github_action_executed` | `RepositoryService` after adapter call succeeds | `"user"` |
+| `github_action_rejected` | `RepositoryService` after confirmation validation fails | `"user"` |
+| `mcp_approval_requested` | `MCPService` before raising `MCPApprovalRequiredError` | `"system"` |
+| `mcp_approval_granted` | `MCPService` after validating `ApprovalRecord` | `"user"` |
+| `mcp_approval_denied` | `MCPService` when an MCP `ApprovalRequest` is **explicitly rejected** by user (NOT expiry) | `"user"` |
+| `mcp_approval_expired` | `MCPService` when `ApprovalRecord.expires_at` is in the past — TTL elapsed, NOT a human rejection | `"system"` |
+| `mcp_approval_missing` | `MCPService` when no `ApprovalRecord` is found for a consequential/unknown tool | `"system"` |
+| `mcp_tool_invoked` | `MCPService` after `MCPClient.call_tool` returns | `"system"` |
+| `mcp_tool_failed` | `MCPService` after `MCPClient.call_tool` raises | `"system"` |
 
 ---
 
@@ -997,8 +1495,8 @@ MCP_SERVERS_CONFIG: str = ""   # Already present in Phase 0; validator added in 
 ## 18. Architectural Decision Records (Phase 1)
 
 ### ADR-0005: Approval gate over direct API calls for consequential actions
-**Decision:** Any action that creates or modifies a Git branch, PR, or external resource requires either `confirmed=True` in the request body (direct API call) or a resolved `ApprovalRequest` (workflow path).
-**Rationale:** Prevents accidental execution of destructive operations. Aligns with the Phase 0 Codex two-phase approval model extended to all external mutations.
+**Decision:** Any action that creates or modifies a Git branch, PR, or external resource requires either a `GitHubConfirmation` record (direct API call, branch/PR creation) or a resolved `ApprovalRequest` (workflow path). The simple `confirmed: bool` field (v1.1.0) is upgraded to a `GitHubConfirmation` record with single-use semantics, expiry, and parameter binding.
+**Rationale:** A `confirmed: bool` field sent by the client can be trivially re-sent with the same value; it does not bind to specific parameters. `GitHubConfirmation` binds the confirmation to a specific repository, operation type, and parameter hash, with a time-limited single-use token. This prevents replay attacks and confirmation-without-reviewing-parameters scenarios. Credential presence (`GITHUB_TOKEN` in Settings) is authentication, not authorization.
 **Alternatives considered:** Role-based access control — deferred (single-user local tool), OAuth tokens — deferred.
 
 ### ADR-0006: Live adapters as registry augmentation (not replacement)
@@ -1014,3 +1512,78 @@ MCP_SERVERS_CONFIG: str = ""   # Already present in Phase 0; validator added in 
 ### ADR-0008: Workflow state machine in service layer, not database
 **Decision:** Status transition validation lives in `WorkflowRunRepository.transition_status`, not in a DB trigger or constraint.
 **Rationale:** SQLite has limited trigger support. Python-side validation is testable with standard pytest. Invalid transitions return 422 HTTP errors, not DB exceptions.
+
+### ADR-0009: WorkflowRun has no paused state
+**Decision:** `WorkflowRun` does not have a `paused` status. `Workflow` (the definition) has `paused`; `WorkflowRun` (the execution) does not.
+**Rationale:** A paused workflow definition should not create new runs; existing runs at an approval gate are in `waiting_approval`. Adding `paused` to `WorkflowRun` would require defining transitions from `running` to `paused` and back, with unclear semantics in Phase 1 when no autonomous execution engine exists. Deferred to Phase 2 if needed.
+
+### ADR-0010: Wave 1 migration is 002 (tags column), not 005
+**Decision:** The `tags_json` column migration is numbered `002` (second in the chain, after `001_create_initial_tables`) rather than `005` as originally drafted.
+**Rationale:** Wave 1 creates migration `002_add_project_tags_column.py`. Its `down_revision = "001_create_initial_tables"`. This allows Wave 1's acceptance criterion "alembic upgrade head applies the tags migration" to be satisfied independently of Wave 2 migrations. If `002` were renamed `005`, it would need migrations `002`–`004` to exist first (since it would chain from `004`), but those are Wave 2 deliverables. The renumbering eliminates this cross-wave dependency.
+
+### ADR-0011: MCPService as mandatory gateway to MCPClient
+**Decision:** All MCP tool invocations go through `MCPService.invoke_tool`. No code path may call `MCPClient.call_tool` directly from a router or adapter.
+**Rationale:** The approval gate for MCP `consequential` and `unknown` tools must be enforced at a single, non-bypassable point. If routers or adapters could call `MCPClient` directly, the approval check could be bypassed. `MCPService` owns the sequential allow-list check + approval gate check and emits all five MCP audit events.
+**Alternatives considered:** Middleware-based interception — rejected (too complex; easier to verify service-layer invariant in code review and integration tests).
+
+### ADR-0012: PRAGMA foreign_keys=ON in SQLAlchemy connect event
+**Decision:** `PRAGMA foreign_keys=ON` is added to the SQLAlchemy `'connect'` event handler in `src/devflow_api/database.py`, alongside `PRAGMA journal_mode=WAL`.
+**Rationale:** SQLite silently ignores FK constraints unless this PRAGMA is set per connection. All `ON DELETE CASCADE` and `ON DELETE SET NULL` semantics in migrations 003–005 depend on it. The event-handler pattern is already in use for WAL mode; reusing it for FK enforcement is consistent and requires no other changes.
+**Alternatives considered:** Setting it only in `alembic/env.py` — rejected (doesn't apply to runtime application connections). Database-level trigger — not supported in SQLite migrations portably.
+
+---
+
+## 19. Requirements-to-Design-to-Tasks Traceability Matrix
+
+| Req ID | Requirement summary | Design section | Task IDs |
+|---|---|---|---|
+| REQ-P1.1 | POST /projects persists to SQLite | §10.1, §4.1, §5.1 | P3, P4, P6 |
+| REQ-P1.2 | GET /projects with filter + pagination | §10.1, §4.1 | P3, P4, P6 |
+| REQ-P1.3 | PUT /projects/{id} partial update, null=skip | §10.1, §4.1 | P3, P4, P6 |
+| REQ-P1.4 | DELETE /projects/{id} removes record | §10.1, §4.1 | P3, P4, P6 |
+| REQ-P1.5 | ProjectResponse + tags + timestamps | §3.1, §11.1 | P1, P2, P6 |
+| REQ-P1.6 | Streamlit Projects page live CRUD | §12.1, §12.2 | P5, P6 |
+| REQ-W1.1 | Workflow model | §3.2 | W1, W6 |
+| REQ-W1.2 | WorkflowRun model + 6 states (no paused) | §3.3, §9 | W1, W6 |
+| REQ-W1.3 | ApprovalRequest model | §3.4 | W1, W6 |
+| REQ-W1.4 | Workflow CRUD endpoints | §10.2 | A1, A5 |
+| REQ-W1.5 | WorkflowRun create + manage; no autonomous exec | §10.2, §9 | W3, W5, A1, A5 |
+| REQ-W1.6 | Approval resolve endpoints | §10.3, §5.2 | W4, W5, A2, A5 |
+| REQ-W1.7 | WorkflowAuditLog + 6 event types | §3.5, §16 | W1, W4, W5, W6 |
+| REQ-I1.1 | GitHubAdapter live | §8.1, §6 | I2, I5, I7 |
+| REQ-I1.2 | OllamaAdapter live | §6.1, §6.2 | I3, I5, I7 |
+| REQ-I1.3 | FigmaAdapter live | §6.1, §6.2 | I3, I5, I7 |
+| REQ-I1.4 | Registry get_live / fallback | §6 | I5, I7 |
+| REQ-I1.5 | IntegrationExecutionError → 502 | §15 | I1, A3, I7 |
+| REQ-I1.6 | Integrations page live status | §12.1 | I6, I7 |
+| REQ-M1.1 | MCPServerConfig model | §7.1 | I4, I6, I7 |
+| REQ-M1.2 | MCPClient subprocess + SIGTERM/SIGKILL | §7.2 | I4, I7 |
+| REQ-M1.3 | MCP tool call structured logging (keys only) | §7.2, §16 | I4, I7 |
+| REQ-M1.4 | MCP allowed_tools permission control | §7.1 | I4, I7 |
+| REQ-M1.5 | MCP secret interpolation + env isolation | §14.4, §7.1 | I4, I7 |
+| REQ-M1.6 | MCPLiveAdapter / MCPStubAdapter fallback | §6, §7.2 | I4, I5, I7 |
+| REQ-M1.7 | MCP tool classification + approval gate + audit events | §7.5 | I4, I7 |
+| REQ-M1.8 | MCP SDK version constraint + lockfile + offline tests | §7.6 | I4 |
+| REQ-G1.1 | RepositoryConfig model (Wave 5); table created Wave 2 | §3.6, §4.4, §10.4 | G1, G3, G5 |
+| REQ-G1.2 | Branch listing + status | §8.1, §10.4 | G2, G3, G5 |
+| REQ-G1.3 | PR listing + detail | §8.1, §10.4 | G2, G3, G5 |
+| REQ-G1.4 | Branch creation with GitHubConfirmation gate | §8.2, §14.1, §10.4 | G2, G3, G5 |
+| REQ-G1.5 | PR creation with GitHubConfirmation gate; no merge | §8.2, §14.1, §10.4 | G2, G3, G5 |
+| REQ-G1.6 | CI status via Check Runs API | §8.1, §10.4 | G2, G3, G5 |
+| REQ-U1.1 | Dashboard live metrics | §12.1 | A4, A5 |
+| REQ-U1.2 | Workflows page | §12.1 | A4, A5 |
+| REQ-U1.3 | History page | §12.1 | A4, A5 |
+| REQ-U1.4 | APIClient extension for all Phase 1 endpoints | §12.2 | P5, A4, I7, G4 |
+| REQ-U1.5 | Settings page Phase 1 config summary | §12.1 | I6, I7, G4, G5 |
+| REQ-DB1.1 | 5 migrations: 002–006, exact revision IDs + chain | §3.0 | P1, W2, G1, G5 |
+| REQ-DB1.2 | Migration 002 adds tags_json, applies from Phase 0 head | §3.1 | P1, P6 |
+| REQ-DB1.3 | PRAGMA foreign_keys=ON on every connection; Wave 1 tests use Wave 1 tables only | §3.7 | P1, P6 (Wave 1 tests), W6 (Wave 2 tests) |
+| REQ-S1.1 | GitHubConfirmation gates; credential ≠ authorization | §14.1, §14.2 | A3, G2, G3, G5, W5, W6 |
+| REQ-S1.2 | Bounded timeouts; timeout test named in I7 | §8.1 (timeout), §17 | I2, I3, I4, I6, I7 |
+| REQ-S1.3 | Secrets not in logs; token test named in I7 | §14.3, §16 | I2, I3, I4, I7 |
+| REQ-S1.4 | No /merge endpoint | §10.4, §18 ADR-0005 | G3, G5 |
+| REQ-S1.5 | MCP env isolation (env-var scope only); subprocess env test | §14.4 | I4, I7 |
+| REQ-T1.1 | 80% branch coverage; canonical pytest command | §13 test file list | P6, W6, A5, I7, G5 |
+| REQ-T1.2 | AppTest smoke tests for all Phase 1 pages | §13 test file list | P6, A5, I7, G5 |
+| REQ-T1.3 | Migration round-trip integration tests | §13 | P6, W6, G5 |
+| REQ-T1.4 | Phase 0 tests continue to pass | §17 | P6, W6, A5, I7, G5 |
