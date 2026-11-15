@@ -680,10 +680,11 @@ DB1.3.2 — `test_foreign_key_pragma_enabled_on_connection` verifies the PRAGMA 
 DB1.3.3 — `test_wave1_cascade_delete_enforced` verifies that deleting a `Project` cascades to delete its associated `Tag`/`ProjectTag` records (or any child record reachable via Wave 1 tables only). This test does NOT reference `WorkflowRun`, `WorkflowAuditLog`, or any Wave 2+ table.
 DB1.3.4 — `test_wave1_insert_invalid_foreign_key_raises_integrity_error` verifies that inserting a row referencing a non-existent `project_id` (e.g., a `repository_configs` row if present, or any Wave 1 FK relationship) raises `IntegrityError` with `PRAGMA foreign_keys=ON`.
 
-*Wave 2 (Task W6 — uses Wave 2 tables: WorkflowRun, WorkflowAuditLog, workflows):*
-DB1.3.5 — `test_cascade_delete_enforced` verifies that deleting a `Project` cascades to delete its associated `WorkflowRun` records (requires Wave 2 tables — deferred to Wave 2 Task W6).
-DB1.3.6 — `test_set_null_enforced` verifies that deleting a `Workflow` sets `WorkflowAuditLog.workflow_run_id` to `NULL` rather than leaving a dangling reference (requires Wave 2 tables — deferred to Wave 2 Task W6).
-DB1.3.7 — `test_insert_invalid_foreign_key_raises_integrity_error` verifies that inserting a `WorkflowRun` with a non-existent `workflow_id` raises `IntegrityError` (requires Wave 2 tables — deferred to Wave 2 Task W6).
+*Wave 2 (Task W6 — uses Wave 2 tables: workflows, workflow_runs, workflow_audit_log):*
+DB1.3.5 — `test_delete_project_sets_workflow_project_id_null` verifies that deleting a `Project` sets `Workflow.project_id` to `NULL` (`ON DELETE SET NULL` — Project deletion does NOT cascade to WorkflowRuns; requires Wave 2 tables — deferred to Wave 2 Task W6).
+DB1.3.6 — `test_delete_workflow_cascades_to_workflow_runs` verifies that deleting a `Workflow` deletes its associated `WorkflowRun` records (`ON DELETE CASCADE` on `WorkflowRun.workflow_id`; requires Wave 2 tables — deferred to Wave 2 Task W6).
+DB1.3.7 — `test_delete_workflow_run_sets_audit_log_workflow_run_id_null` verifies that deleting a `WorkflowRun` sets `WorkflowAuditLog.workflow_run_id` to `NULL` rather than leaving a dangling reference (`ON DELETE SET NULL`; requires Wave 2 tables — deferred to Wave 2 Task W6).
+DB1.3.8 — `test_insert_invalid_foreign_key_raises_integrity_error` verifies that inserting a `WorkflowRun` with a non-existent `workflow_id` raises `IntegrityError` (requires Wave 2 tables — deferred to Wave 2 Task W6).
 
 ---
 

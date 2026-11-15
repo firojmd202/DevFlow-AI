@@ -309,9 +309,10 @@ Write unit and smoke tests covering all Wave 1 deliverables.
 - `test_wave1_cascade_delete_enforced` — deleting a `Project` cascades to any child records reachable via Wave 1 tables only. If no Wave 1 child FK exists yet, creates a minimal test using the tags_json column FK relationships or skips with a comment that Wave 2 provides the full cascade test. Does NOT reference `WorkflowRun`, `WorkflowAuditLog`, or any Wave 2+ table. (REQ-DB1.3.3)
 - `test_wave1_insert_invalid_foreign_key_raises_integrity_error` — inserts a row referencing a non-existent `project_id` in a Wave 1 table. If no Wave 1 child FK table exists, creates a minimal in-memory table with a FK to verify PRAGMA is enforcing constraints. Does NOT reference `WorkflowRun` or any Wave 2+ table. (REQ-DB1.3.4)
 
-**Note on FK tests moved to Wave 2 (F1 correction):** The following tests reference Wave 2 tables and are deferred to Task W6:
-- `test_cascade_delete_enforced` (WorkflowRun cascade from Project)
-- `test_set_null_enforced` (WorkflowAuditLog.workflow_run_id SET NULL when Workflow deleted)
+**Note on FK tests moved to Wave 2 (F2 correction):** The following tests reference Wave 2 tables and are deferred to Task W6:
+- `test_delete_project_sets_workflow_project_id_null` (Workflow.project_id SET NULL when Project deleted)
+- `test_delete_workflow_cascades_to_workflow_runs` (WorkflowRun CASCADE when Workflow deleted)
+- `test_delete_workflow_run_sets_audit_log_workflow_run_id_null` (WorkflowAuditLog.workflow_run_id SET NULL when WorkflowRun deleted)
 - `test_insert_invalid_foreign_key_raises_integrity_error` (WorkflowRun with non-existent workflow_id)
 
 **Acceptance Criteria:**
@@ -534,9 +535,10 @@ Write unit and integration tests covering all Wave 2 deliverables.
 - `test_resolve_already_resolved_raises`
 - `test_audit_list_ordered_by_created_at`
 - `test_migration_003_004_005_round_trip` — upgrade/downgrade for migrations 003, 004, 005
-- `test_cascade_delete_enforced` — deleting a `Project` cascades to delete its `WorkflowRun` records (REQ-DB1.3.5 — requires Wave 2 tables; deferred from Task P6 by F1 correction)
-- `test_set_null_enforced` — deleting a `Workflow` sets `WorkflowAuditLog.workflow_run_id` to `NULL` (REQ-DB1.3.6 — requires Wave 2 tables; deferred from Task P6 by F1 correction)
-- `test_insert_invalid_foreign_key_raises_integrity_error` — inserting `WorkflowRun` with non-existent `workflow_id` raises `IntegrityError` (REQ-DB1.3.7 — requires Wave 2 tables; deferred from Task P6 by F1 correction)
+- `test_delete_project_sets_workflow_project_id_null` — deleting a `Project` sets `Workflow.project_id` to `NULL` (`ON DELETE SET NULL`; REQ-DB1.3.5 — requires Wave 2 tables; deferred from Task P6 by F2 correction)
+- `test_delete_workflow_cascades_to_workflow_runs` — deleting a `Workflow` deletes its `WorkflowRun` records (`ON DELETE CASCADE` on `WorkflowRun.workflow_id`; REQ-DB1.3.6 — requires Wave 2 tables; deferred from Task P6 by F2 correction)
+- `test_delete_workflow_run_sets_audit_log_workflow_run_id_null` — deleting a `WorkflowRun` sets `WorkflowAuditLog.workflow_run_id` to `NULL` (`ON DELETE SET NULL`; REQ-DB1.3.7 — requires Wave 2 tables; deferred from Task P6 by F2 correction)
+- `test_insert_invalid_foreign_key_raises_integrity_error` — inserting `WorkflowRun` with non-existent `workflow_id` raises `IntegrityError` (REQ-DB1.3.8 — requires Wave 2 tables; deferred from Task P6 by F2 correction)
 
 **Acceptance Criteria:**
 1. All new tests pass.

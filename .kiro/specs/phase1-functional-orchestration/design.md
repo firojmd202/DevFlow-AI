@@ -346,6 +346,18 @@ def configure_sqlite_pragmas(
         cursor.close()
 ```
 
+**Foreign-key relationships and ON DELETE behaviors (F2 correction):**
+
+The three workflow-domain FK relationships and their delete behaviors are:
+
+| Column | References | ON DELETE behavior | Effect |
+|---|---|---|---|
+| `Workflow.project_id` | `projects.id` | **SET NULL** | Deleting a Project sets `Workflow.project_id` to NULL; the Workflow record is NOT deleted. |
+| `WorkflowRun.workflow_id` | `workflows.id` | **CASCADE** | Deleting a Workflow deletes all its WorkflowRun records. |
+| `WorkflowAuditLog.workflow_run_id` | `workflow_runs.id` | **SET NULL** | Deleting a WorkflowRun sets `WorkflowAuditLog.workflow_run_id` to NULL; audit log entries are NOT deleted. |
+
+**Note:** Deleting a Project does NOT cascade to WorkflowRun records. The chain is: Project deleted → Workflow.project_id set NULL (Workflow remains) → no further cascade. WorkflowRun records are only deleted when their parent Workflow is deleted.
+
 **Note on `alembic/env.py`:** The existing `alembic/env.py` already registers a `'connect'` event for `PRAGMA journal_mode=WAL`. During implementation, `PRAGMA foreign_keys=ON` must also be added to that same handler in `alembic/env.py`. The `alembic/env.py` file is out of scope for this specification-correction step and will be updated by the implementer alongside `src/devflow_api/database.py`.
 
 ---
@@ -1577,7 +1589,7 @@ MCP_SERVERS_CONFIG: str = ""   # Already present in Phase 0; validator added in 
 | REQ-U1.5 | Settings page Phase 1 config summary | §12.1 | I6, I7, G4, G5 |
 | REQ-DB1.1 | 5 migrations: 002–006, exact revision IDs + chain | §3.0 | P1, W2, G1, G5 |
 | REQ-DB1.2 | Migration 002 adds tags_json, applies from Phase 0 head | §3.1 | P1, P6 |
-| REQ-DB1.3 | PRAGMA foreign_keys=ON on every connection; Wave 1 tests use Wave 1 tables only | §3.7 | P1, P6 (Wave 1 tests), W6 (Wave 2 tests) |
+| REQ-DB1.3 | PRAGMA foreign_keys=ON on every connection; correct CASCADE/SET NULL directions; Wave 1 tests use Wave 1 tables only | §3.7 | P1, P6 (Wave 1 tests), W6 (Wave 2 tests) |
 | REQ-S1.1 | GitHubConfirmation gates; credential ≠ authorization | §14.1, §14.2 | A3, G2, G3, G5, W5, W6 |
 | REQ-S1.2 | Bounded timeouts; timeout test named in I7 | §8.1 (timeout), §17 | I2, I3, I4, I6, I7 |
 | REQ-S1.3 | Secrets not in logs; token test named in I7 | §14.3, §16 | I2, I3, I4, I7 |
