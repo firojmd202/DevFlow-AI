@@ -1,18 +1,19 @@
 # DevFlow AI — Phase 1: Implementation Tasks
 
-**Version:** 1.3.0
+**Version:** 1.4.0
 **Status:** Corrected — Awaiting Final Independent Review
 **Scope:** Phase 1 — Functional Orchestration
 **Branch:** feature/phase1-specification-planning
 **Base commit:** aaaaacb703124fc31b0e757b2bf1739c4fb225c9
-**Last Updated:** [current correction pass — implementer fills date at commit time]
-**Supersedes:** v1.2.0 (F1–F5 and D1–D4 final specification corrections applied — see .agents/tasks/phase1-final-spec-correction-report.md)
+**Last Updated:** 2026-11-15
+**Supersedes:** v1.3.0 (F1–F3 corrections applied — see .agents/tasks/phase1-v1.4.0-correction-report.md)
 
 **Version history:**
 - v1.0.0 — Initial specification
 - v1.1.0 — Eight independent-review findings applied
 - v1.2.0 — Five amendment-round findings applied
 - v1.3.0 — Final specification correction: F1–F5 and D1–D4 applied (FK test split to Wave 1 / Wave 2, GitHubConfirmation persistence + migration 006 + 6 named tests in Wave 5, MCP 8-step sequence + 3 new audit events + named test, superseded guidance labelled, metadata corrected)
+- v1.4.0 — 2026-11-15 — Corrections F1 (MCP approval authorization via approval_request_id), F2 (FK cascade test corrections), F3 (metadata), F6 (MCPApproval dedicated schema + migration 007), F7 (outdated MCP authorization references), F8 (Wave 1 FK tests), F9 (approval consumption and external failure handling). Branch: feature/phase1-specification-planning, Base: aaaaacb703124fc31b0e757b2bf1739c4fb225c9.
 
 ---
 
@@ -306,14 +307,16 @@ Write unit and smoke tests covering all Wave 1 deliverables.
 - `test_migration_002_round_trip` — alembic upgrade/downgrade for tags column (migration 002, chains from 001)
 - `test_projects_page_renders` — AppTest smoke test
 - `test_foreign_key_pragma_enabled_on_connection` — queries `PRAGMA foreign_keys` and asserts result is `1` (REQ-DB1.3.2). Uses in-memory SQLite only — no Wave 2 tables required.
-- `test_wave1_cascade_delete_enforced` — deleting a `Project` cascades to any child records reachable via Wave 1 tables only. If no Wave 1 child FK exists yet, creates a minimal test using the tags_json column FK relationships or skips with a comment that Wave 2 provides the full cascade test. Does NOT reference `WorkflowRun`, `WorkflowAuditLog`, or any Wave 2+ table. (REQ-DB1.3.3)
-- `test_wave1_insert_invalid_foreign_key_raises_integrity_error` — inserts a row referencing a non-existent `project_id` in a Wave 1 table. If no Wave 1 child FK table exists, creates a minimal in-memory table with a FK to verify PRAGMA is enforcing constraints. Does NOT reference `WorkflowRun` or any Wave 2+ table. (REQ-DB1.3.4)
+- `test_fk_enforcement_with_wave1_tables` — verifies FK enforcement with PRAGMA active. Use `repository_configs.project_id → projects.id` if available (Wave 2 table), OR create a minimal in-memory `sa.Table` with an FK to `projects` to verify PRAGMA enforcement without depending on Wave 2 models. Does NOT reference `WorkflowRun`, `WorkflowAuditLog`, or any Wave 2 model class. (REQ-DB1.3.3 F8 correction)
+- `test_migration_002_upgrade_downgrade` — applies `alembic upgrade` to revision 002 and downgrades back to base; asserts no error occurs. Uses `tmp_path`-scoped SQLite file. (REQ-DB1.3.4 F8 correction)
 
-**Note on FK tests moved to Wave 2 (F2 correction):** The following tests reference Wave 2 tables and are deferred to Task W6:
+**Note on FK tests moved to Wave 2 (F2/F8 correction):** The following tests reference Wave 2 tables and are deferred to Task W6:
 - `test_delete_project_sets_workflow_project_id_null` (Workflow.project_id SET NULL when Project deleted)
 - `test_delete_workflow_cascades_to_workflow_runs` (WorkflowRun CASCADE when Workflow deleted)
 - `test_delete_workflow_run_sets_audit_log_workflow_run_id_null` (WorkflowAuditLog.workflow_run_id SET NULL when WorkflowRun deleted)
 - `test_insert_invalid_foreign_key_raises_integrity_error` (WorkflowRun with non-existent workflow_id)
+
+**Note on removed test (F8 correction):** `test_wave1_cascade_delete_enforced` has been removed from Wave 1 (Task P6). No real CASCADE relationship exists between Wave 1 tables — `projects` has no child FK table in Wave 1. The ambiguous "if no Wave 1 child FK exists yet, creates a minimal test using the tags_json column FK relationships or skips with a comment" language is replaced by the precise `test_fk_enforcement_with_wave1_tables` and `test_migration_002_upgrade_downgrade` tests above.
 
 **Acceptance Criteria:**
 1. All new tests pass.
@@ -804,9 +807,11 @@ Implement `src/devflow_api/adapters/mcp_client.py` with `MCPServerConfig`, `MCPC
 **Deliverables:**
 - `src/devflow_api/adapters/mcp_client.py`
 - `src/devflow_api/adapters/live/mcp_live.py`
-- `src/devflow_api/services/mcp_service.py` — MCPService (approval gate + audit events)
-- `src/devflow_api/repositories/approval_request.py` — ApprovalRequestRepository (get_by_id, create, consume_atomic)
-- `src/devflow_api/adapters/exceptions.py` — extended with `MCPApprovalRequiredError`, `MCPApprovalExpiredError`
+- `src/devflow_api/services/mcp_service.py` — MCPService (approval gate + audit events; uses MCPApprovalRepository)
+- `src/devflow_api/models/mcp_approval.py` — MCPApproval model (UUID PK, mcp_approvals table)
+- `src/devflow_api/repositories/mcp_approval.py` — MCPApprovalRepository (create, get_by_id, consume_atomic, list_pending)
+- `src/devflow_api/repositories/approval_request.py` — ApprovalRequestRepository (workflow step approvals only; NOT used by MCPService)
+- `src/devflow_api/adapters/exceptions.py` — extended with `MCPApprovalRequiredError`, `MCPApprovalExpiredError`, `ConsumedError`
 - `requirements/base.txt` — add `mcp>=1.0,<2.0` (after checking `pyproject.toml` for an existing `mcp` declaration; use the existing version if present)
 - `requirements/requirements.lock` (or equivalent) — generated lockfile committed
 
@@ -816,10 +821,11 @@ Implement `src/devflow_api/adapters/mcp_client.py` with `MCPServerConfig`, `MCPC
 - Log `arg_keys = list(arguments.keys())` — NEVER log argument values.
 - Terminate subprocess unconditionally in `finally` using SIGTERM → 5s grace → SIGKILL sequence.
 - Subprocess MUST be launched with `env=resolved_env` (not `env=None`).
-- `MCPService.invoke_tool` signature: `invoke_tool(server_name, tool_name, arguments, actor_id, workflow_run_id=None, approval_request_id=None)`. The parameter is `approval_request_id: str | None`, NOT `approval_record`. Callers MUST NOT pass a pre-built approval object.
-- `MCPService` retrieves the `ApprovalRequest` from `ApprovalRequestRepository` by `approval_request_id` and validates it internally (status == APPROVED, not expired, field match, not already CONSUMED).
-- Atomic consumption: `ApprovalRequestRepository.consume_atomic` sets `status = CONSUMED` and `consumed_at = now(UTC)` via `UPDATE ... WHERE status = 'APPROVED' AND id = ?`. If 0 rows updated, raises `MCPApprovalRequiredError` (replay prevention and concurrent-call safety).
-- `MCPService` owns the approval gate: allow-list check → classification → retrieve `ApprovalRequest` by `approval_request_id` → validate → `consume_atomic` → `MCPClient.call_tool`. All seven MCP audit events are emitted by `MCPService`.
+- `MCPService.invoke_tool` signature: `invoke_tool(server_name, tool_name, arguments, actor_id, workflow_run_id=None, mcp_approval_id=None)`. The parameter is `mcp_approval_id: UUID | None`, NOT `approval_request_id` and NOT `approval_record`. Callers MUST NOT pass a pre-built approval object.
+- `MCPService` retrieves the `MCPApproval` from `MCPApprovalRepository` by `mcp_approval_id` and validates it internally (status == APPROVED, not expired, field match, not already CONSUMED). `MCPService` MUST NOT use `ApprovalRequestRepository` — that is for workflow step approvals only.
+- Atomic consumption: `MCPApprovalRepository.consume_atomic(mcp_approval_id)` sets `status = CONSUMED` and `consumed_at = now(UTC)` via `UPDATE ... WHERE status = 'APPROVED' AND id = ?`. If 0 rows updated, raises `ConsumedError` (replay prevention and concurrent-call safety).
+- `MCPService` owns the approval gate: allow-list check → classification → retrieve `MCPApproval` by `mcp_approval_id` → validate → `consume_atomic` → `MCPClient.call_tool`. All eight MCP audit events are emitted by `MCPService`.
+- Failure semantics (F9): after `consume_atomic`, if `MCPClient.call_tool` fails, the `MCPApproval` remains CONSUMED — it is NOT restored. Log `mcp_tool_failed`. A new `MCPApproval` is required for retry.
 - No code path may call `MCPClient.call_tool` directly from a router, adapter, or any other layer; all MCP calls must go through `MCPService.invoke_tool`.
 - All MCP tests MUST run offline using mocked subprocess responses; no live MCP server is required (REQ-M1.8.3).
 
@@ -830,38 +836,42 @@ Implement `src/devflow_api/adapters/mcp_client.py` with `MCPServerConfig`, `MCPC
 4. `${MISSING}` raises `MCPSecretResolutionError` before process launch.
 5. Tool not in `allowed_tools` raises `MCPPermissionError` before subprocess starts.
 6. Subprocess is launched with `env=resolved_env` (verified by inspecting mock call arguments).
-7. `MCPService.invoke_tool` signature accepts `approval_request_id: str | None`, not an `ApprovalRecord` object.
-8. `MCPService.invoke_tool` raises `MCPApprovalRequiredError` for `consequential`/`unknown` tools when `approval_request_id` is None or the retrieved `ApprovalRequest` is not found/not APPROVED.
-9. `MCPService.invoke_tool` raises `MCPApprovalExpiredError` for an `ApprovalRequest` with `expires_at` in the past.
-10. `MCPService.invoke_tool` raises `MCPApprovalRequiredError` for an `ApprovalRequest` whose `tool_name` or `arguments_hash` or `actor_id` does not match the current invocation.
-11. `MCPService.invoke_tool` raises `MCPApprovalRequiredError` for an `ApprovalRequest` with `status = CONSUMED` (replay prevention).
-12. `ApprovalRequestRepository.consume_atomic` atomically sets `status = CONSUMED` and `consumed_at`; two concurrent calls with the same `approval_request_id` result in exactly one success and one `MCPApprovalRequiredError`.
-13. `MCPService.invoke_tool` emits all seven MCP audit events to `AuditLogRepository`.
-14. `mypy --strict src/devflow_api/adapters/mcp_client.py src/devflow_api/adapters/live/mcp_live.py src/devflow_api/services/mcp_service.py src/devflow_api/repositories/approval_request.py` exits with code 0.
+7. `MCPService.invoke_tool` signature accepts `mcp_approval_id: UUID | None`, not an `ApprovalRecord` or `ApprovalRequest` object.
+8. `MCPService.invoke_tool` raises `MCPApprovalRequiredError` for `consequential`/`unknown` tools when `mcp_approval_id` is None or the retrieved `MCPApproval` is not found/not APPROVED.
+9. `MCPService.invoke_tool` raises `MCPApprovalExpiredError` for an `MCPApproval` with `expires_at` in the past.
+10. `MCPService.invoke_tool` raises `MCPApprovalRequiredError` for an `MCPApproval` whose `tool_name` or `arguments_hash` or `actor_id` does not match the current invocation.
+11. `MCPService.invoke_tool` raises `MCPApprovalRequiredError` for an `MCPApproval` with `status = CONSUMED` (replay prevention).
+12. `MCPApprovalRepository.consume_atomic` atomically sets `status = CONSUMED` and `consumed_at`; two concurrent calls with the same `mcp_approval_id` result in exactly one success and one `ConsumedError`.
+13. `MCPService.invoke_tool` emits all eight MCP audit events to `AuditLogRepository` (including `mcp_tool_completed` and `mcp_tool_failed` as separate events).
+14. After `MCPClient.call_tool` raises an exception, `MCPApproval` remains CONSUMED (not restored to APPROVED). `mcp_tool_failed` is logged.
+15. `mypy --strict src/devflow_api/adapters/mcp_client.py src/devflow_api/adapters/live/mcp_live.py src/devflow_api/services/mcp_service.py src/devflow_api/repositories/mcp_approval.py src/devflow_api/models/mcp_approval.py` exits with code 0.
 15. All MCP unit tests mock MCP subprocess; no real process is spawned.
 16. `requirements/base.txt` contains `mcp>=1.0,<2.0` (or the actual constraint if `pyproject.toml` already declares a different `mcp` version).
 
 **Named tests (all 8 MUST be present in `tests/unit/test_mcp_service.py`):**
-- `test_forged_approval_record_rejected` — verifies a caller cannot bypass the gate by constructing an in-memory approval object; `MCPService.invoke_tool` only accepts `approval_request_id` and retrieves the record from the repository
-- `test_expired_approval_rejected_at_invocation` — `ApprovalRequest.expires_at` in the past raises `MCPApprovalExpiredError`
-- `test_mismatched_tool_name_rejected` — `ApprovalRequest.tool_name` differs from invoked tool → `MCPApprovalRequiredError`
-- `test_mismatched_arguments_hash_rejected` — `ApprovalRequest.arguments_hash` does not match SHA-256 of supplied arguments → `MCPApprovalRequiredError`
-- `test_replay_after_consumption_rejected` — second call with an already-`CONSUMED` `ApprovalRequest` → `MCPApprovalRequiredError`
-- `test_concurrent_consumption_safe` — two concurrent `invoke_tool` calls with the same `approval_request_id` result in exactly one success and one `MCPApprovalRequiredError` (atomic consumption via `consume_atomic`)
-- `test_read_only_tool_no_approval_required` — `read_only` classified tool proceeds without `approval_request_id`
+- `test_forged_approval_record_rejected` — verifies a caller cannot bypass the gate by constructing an in-memory approval object; `MCPService.invoke_tool` only accepts `mcp_approval_id` and retrieves `MCPApproval` from `MCPApprovalRepository`
+- `test_expired_approval_rejected_at_invocation` — `MCPApproval.expires_at` in the past raises `MCPApprovalExpiredError`
+- `test_mismatched_tool_name_rejected` — `MCPApproval.tool_name` differs from invoked tool → `MCPApprovalRequiredError`
+- `test_mismatched_arguments_hash_rejected` — `MCPApproval.arguments_hash` does not match SHA-256 of supplied arguments → `MCPApprovalRequiredError`
+- `test_replay_after_consumption_rejected` — second call with an already-`CONSUMED` `MCPApproval` → `MCPApprovalRequiredError`
+- `test_concurrent_consumption_safe` — two concurrent `invoke_tool` calls with the same `mcp_approval_id` result in exactly one success and one `MCPApprovalRequiredError` (atomic consumption via `MCPApprovalRepository.consume_atomic`)
+- `test_read_only_tool_no_approval_required` — `read_only` classified tool proceeds without `mcp_approval_id`
 - `test_no_direct_mcp_client_bypass` — integration test verifying no router or adapter calls `MCPClient.call_tool` directly without going through `MCPService.invoke_tool`
 
-**Additional named tests (MUST also be present — from prior specification):**
-- `test_unknown_tool_denied_without_approval` — MCPService raises MCPApprovalRequiredError for unknown tool without approval_request_id
-- `test_consequential_tool_denied_without_approval` — MCPService raises MCPApprovalRequiredError for consequential tool without approval_request_id
-- `test_read_only_tool_permitted_without_approval` — MCPService allows read_only tool without approval_request_id (subject to allow-list)
+**Additional named tests (MUST also be present — from prior specification, updated for F6):**
+- `test_unknown_tool_denied_without_approval` — MCPService raises MCPApprovalRequiredError for unknown tool without mcp_approval_id
+- `test_consequential_tool_denied_without_approval` — MCPService raises MCPApprovalRequiredError for consequential tool without mcp_approval_id
+- `test_read_only_tool_permitted_without_approval` — MCPService allows read_only tool without mcp_approval_id (subject to allow-list)
 - `test_direct_mcp_client_call_blocked_without_service_layer` — integration test verifying no router/adapter bypasses MCPService
-- `test_expired_mcp_approval_rejected` — MCPService raises MCPApprovalExpiredError for ApprovalRequest with expires_at in past
-- `test_expired_mcp_approval_emits_approval_expired_event` — verifies an expired ApprovalRequest emits `mcp_approval_expired` audit event, NOT `mcp_approval_denied`
-- `test_missing_approval_emits_approval_missing_event` — verifies absence of ApprovalRequest (or absent approval_request_id) emits `mcp_approval_missing` audit event
-- `test_allowlist_alone_insufficient_for_consequential_tool` — verifies a tool that passes allow-list check but lacks ApprovalRequest is still denied for consequential classification
+- `test_expired_mcp_approval_rejected` — MCPService raises MCPApprovalExpiredError for MCPApproval with expires_at in past
+- `test_expired_mcp_approval_emits_approval_expired_event` — verifies an expired MCPApproval emits `mcp_approval_expired` audit event, NOT `mcp_approval_denied`
+- `test_missing_approval_emits_approval_missing_event` — verifies absence of MCPApproval (or absent mcp_approval_id) emits `mcp_approval_missing` audit event
+- `test_allowlist_alone_insufficient_for_consequential_tool` — verifies a tool that passes allow-list check but lacks MCPApproval is still denied for consequential classification
 - `test_mcp_client_uses_locked_sdk_version` — asserts installed `mcp` package version satisfies `>=1.0,<2.0`
 - `test_mcp_integration_runs_offline_with_mock_subprocess` — full MCPService → MCPClient flow with mocked subprocess, no network
+- `test_execution_failure_does_not_restore_approval` — after `mcp_tool_failed`, MCPApproval remains CONSUMED (F9)
+- `test_timeout_recorded_as_indeterminate_in_audit` — subprocess timeout logs `mcp_tool_failed`; MCPApproval not restored (F9)
+- `test_new_approval_required_for_retry_after_failure` — retry after failure requires new MCPApproval; consumed one raises MCPApprovalRequiredError (F9)
 
 **Definition of Done:** Files committed; all criteria verified in I7 tests.
 
@@ -966,14 +976,17 @@ Replace `9_Integrations.py` placeholder with live integration status. Extend `10
 - `test_allowlist_alone_insufficient_for_consequential_tool` ← F3 required (allow-list ≠ sufficient for consequential)
 - `test_mcp_client_uses_locked_sdk_version` ← SDK version required
 - `test_mcp_integration_runs_offline_with_mock_subprocess` ← offline testing required
-- `test_forged_approval_record_rejected` ← F1 required (caller cannot fabricate approval object)
-- `test_expired_approval_rejected_at_invocation` ← F1 required (expires_at validation at invocation)
-- `test_mismatched_tool_name_rejected` ← F1 required (tool_name binding)
-- `test_mismatched_arguments_hash_rejected` ← F1 required (arguments_hash binding)
-- `test_replay_after_consumption_rejected` ← F1 required (one-time use)
-- `test_concurrent_consumption_safe` ← F1 required (atomic consumption)
-- `test_read_only_tool_no_approval_required` ← F1 required (read_only bypass)
-- `test_no_direct_mcp_client_bypass` ← F1 required (no-bypass rule)
+- `test_forged_approval_record_rejected` ← F1/F6 required (caller cannot fabricate MCPApproval object; only mcp_approval_id accepted)
+- `test_expired_approval_rejected_at_invocation` ← F1/F6 required (MCPApproval.expires_at validation at invocation)
+- `test_mismatched_tool_name_rejected` ← F1/F6 required (tool_name binding on MCPApproval)
+- `test_mismatched_arguments_hash_rejected` ← F1/F6 required (arguments_hash binding on MCPApproval)
+- `test_replay_after_consumption_rejected` ← F1/F6 required (one-time use on MCPApproval)
+- `test_concurrent_consumption_safe` ← F1/F6 required (atomic MCPApprovalRepository.consume_atomic)
+- `test_read_only_tool_no_approval_required` ← F1/F6 required (read_only bypass)
+- `test_no_direct_mcp_client_bypass` ← F1/F6 required (no-bypass rule)
+- `test_execution_failure_does_not_restore_approval` ← F9 required (MCPApproval stays CONSUMED after failure)
+- `test_timeout_recorded_as_indeterminate_in_audit` ← F9 required (timeout logs mcp_tool_failed)
+- `test_new_approval_required_for_retry_after_failure` ← F9 required (new MCPApproval needed for retry)
 - `test_integrations_page_renders` (mocked APIClient)
 - `test_settings_page_renders` (mocked APIClient)
 
@@ -993,15 +1006,17 @@ Replace `9_Integrations.py` placeholder with live integration status. Extend `10
 
 ---
 
-### Task G1 — Repository model, RepositoryConfigRepository, GitHubConfirmation model, and migration 006
+### Task G1 — Repository model, RepositoryConfigRepository, GitHubConfirmation model, migration 006, MCPApproval model, MCPApprovalRepository, and migration 007
 
 **Wave:** 5
-**Requirements:** REQ-G1.1, REQ-G1.4, REQ-DB1.1
+**Requirements:** REQ-G1.1, REQ-G1.4, REQ-DB1.1, REQ-M2.1, REQ-M2.2, REQ-M2.3
 **Depends on:** Wave 4 merged (and implicitly W2 — migration 005 creates the repository_configs table)
 **Estimated size:** Medium (3–4 hours)
 
 **Description:**
-Implement `src/devflow_api/models/repository.py` with `RepositoryConfig`. The `repository_configs` table was created by migration `005_add_repository_tables.py` in Wave 2 (Task W2). Implement `src/devflow_api/models/github_confirmation.py` with the SQLAlchemy `GitHubConfirmation` model (F2 correction — SQLite-backed, not in-memory). Author migration `006_add_github_confirmations.py` chaining from migration `005`. The table does not exist until this migration is applied; `GitHubConfirmationRepository` reads from the `github_confirmations` table created by migration 006.
+Implement `src/devflow_api/models/repository.py` with `RepositoryConfig`. The `repository_configs` table was created by migration `005_add_repository_tables.py` in Wave 2 (Task W2). Implement `src/devflow_api/models/github_confirmation.py` with the SQLAlchemy `GitHubConfirmation` model (F2 correction — SQLite-backed, not in-memory). Author migration `006_add_github_confirmations.py` chaining from migration `005`. Implement `src/devflow_api/models/mcp_approval.py` with `MCPApproval` model (F6 correction). Implement `src/devflow_api/repositories/mcp_approval.py` with `MCPApprovalRepository`. Author migration `007_add_mcp_approvals.py` chaining from migration `006`. Wave 5 completion requires both migrations 006 and 007 applied.
+
+**Wave 5 migration reassignment note (F6):** Migration 007 is a new Wave 5 deliverable. Wave 5 previously encompassed only migration 006. Wave 5 now delivers two migrations: 006 (github_confirmations) and 007 (mcp_approvals). Both are authored in Task G1 (extended). This extends Wave 5 beyond its prior scope but does not change the wave ownership of any earlier migration.
 
 **Deliverables:**
 - `src/devflow_api/models/repository.py`
@@ -1009,6 +1024,9 @@ Implement `src/devflow_api/models/repository.py` with `RepositoryConfig`. The `r
 - `src/devflow_api/models/github_confirmation.py` — `GitHubConfirmation` SQLAlchemy model (see design.md §3.7a and §8.2)
 - `src/devflow_api/repositories/github_confirmation.py` — `GitHubConfirmationRepository` with `get_by_id`, `create`, `consume_atomic`
 - `alembic/versions/006_add_github_confirmations.py` — migration chaining from 005
+- `src/devflow_api/models/mcp_approval.py` — `MCPApproval` SQLAlchemy model (see design.md §3.7b)
+- `src/devflow_api/repositories/mcp_approval.py` — `MCPApprovalRepository` with `create`, `get_by_id`, `consume_atomic`, `list_pending`
+- `alembic/versions/007_add_mcp_approvals.py` — migration chaining from 006
 
 **Migration 006 required content:**
 ```python
@@ -1041,7 +1059,7 @@ def downgrade() -> None:
     op.drop_table("github_confirmations")
 ```
 
-**Dependency note:** This task depends on Wave 2 having been merged (which includes migration 005 creating the repository_configs table). The dependency `"Wave 4 merged"` implies Wave 2 was already merged; migration 005 must exist. Migration 006 chains from 005 and must be applied for `GitHubConfirmationRepository` to function.
+**Dependency note:** This task depends on Wave 2 having been merged (which includes migration 005 creating the repository_configs table). The dependency `"Wave 4 merged"` implies Wave 2 was already merged; migration 005 must exist. Migration 006 chains from 005. Migration 007 chains from 006. Both must be applied for `GitHubConfirmationRepository` and `MCPApprovalRepository` to function.
 
 **Acceptance Criteria:**
 1. `RepositoryConfig` model importable with correct FK and unique constraint.
@@ -1050,10 +1068,15 @@ def downgrade() -> None:
 4. Creating a duplicate `(project_id, owner, repo)` raises a SQLAlchemy `IntegrityError`.
 5. `GitHubConfirmation` model importable from `devflow_api.models.github_confirmation`.
 6. `GitHubConfirmationRepository.consume_atomic` atomically sets `used_at` and returns the updated record; raises `ConfirmationAlreadyUsedError` if already used.
-7. `alembic upgrade head` from `005_add_repository_tables` applies migration 006 without error.
-8. `alembic downgrade -1` from `006` removes `github_confirmations` table without error.
-9. Migration 006 file has `revision = "006_add_github_confirmations"` and `down_revision = "005_add_repository_tables"` exactly.
-10. `mypy --strict src/devflow_api/models/repository.py src/devflow_api/models/github_confirmation.py src/devflow_api/repositories/repository_config.py src/devflow_api/repositories/github_confirmation.py` exits with code 0.
+7. `alembic upgrade head` from `005_add_repository_tables` applies migrations 006 and 007 in order without error.
+8. `alembic downgrade -1` from `007` removes `mcp_approvals` table without error.
+9. `alembic downgrade -1` from `006` removes `github_confirmations` table without error.
+10. Migration 006 file has `revision = "006_add_github_confirmations"` and `down_revision = "005_add_repository_tables"` exactly.
+11. Migration 007 file has `revision = "007_add_mcp_approvals"` and `down_revision = "006_add_github_confirmations"` exactly.
+12. `MCPApproval` model importable from `devflow_api.models.mcp_approval`.
+13. `MCPApprovalRepository.consume_atomic` atomically sets `status = CONSUMED` and `consumed_at`; raises `ConsumedError` if 0 rows updated.
+14. Two concurrent `MCPApprovalRepository.consume_atomic` calls with the same id result in exactly one success and one `ConsumedError`.
+15. `mypy --strict src/devflow_api/models/repository.py src/devflow_api/models/github_confirmation.py src/devflow_api/repositories/repository_config.py src/devflow_api/repositories/github_confirmation.py src/devflow_api/models/mcp_approval.py src/devflow_api/repositories/mcp_approval.py` exits with code 0.
 
 **Definition of Done:** Files committed; all criteria verified in G5 tests.
 
@@ -1184,7 +1207,7 @@ Write all Wave 5 tests and run full CI verification to confirm Phase 1 completio
 - `test_no_merge_endpoint_exists` — asserts `/merge` not in openapi.json routes
 - `test_branch_creation_logs_audit_event` — event_type = "branch_created"
 - `test_pr_creation_logs_audit_event` — event_type = "pr_created"
-- `test_migration_full_round_trip` — all 6 migrations (001→002→003→004→005→006) up and down in a tmp_path SQLite
+- `test_migration_full_round_trip` — all 7 migrations (001→002→003→004→005→006→007) up and down in a tmp_path SQLite
 - `test_settings_page_github_status` (mocked APIClient)
 - `test_github_confirmation_persisted_to_db` (from G2 — integrated full-stack verification)
 - `test_confirmation_expires_after_ttl` (from G2 — integrated full-stack verification)
@@ -1192,6 +1215,9 @@ Write all Wave 5 tests and run full CI verification to confirm Phase 1 completio
 - `test_parameter_mismatch_rejected` (from G2 — integrated full-stack verification)
 - `test_concurrent_consumption_safe` (from G2 — concurrent test using async)
 - `test_recovery_after_github_api_failure` (from G2 — error path test)
+- `test_github_confirmation_not_restored_after_api_failure` — after GitHub API failure post-consumption, GitHubConfirmation remains consumed; new confirmation required for retry (F9)
+- `test_mcp_approval_model_importable` — MCPApproval importable from devflow_api.models.mcp_approval (F6)
+- `test_mcp_approval_consume_atomic_safe` — concurrent consume_atomic calls: exactly one success, one ConsumedError (F6)
 
 **Final verification commands (record output in commit message):**
 ```
@@ -1207,7 +1233,9 @@ ruff check .
 4. `ruff check .` exits with code 0.
 5. `docs/openapi.json` contains no path with the word `merge`.
 6. All Phase 0 tests continue to pass.
-7. `alembic upgrade head` from Phase 0 schema reaches `"006_add_github_confirmations"` without error (migration chain: 001→002→003→004→005→006). (F2 correction)
+7. `alembic upgrade head` from Phase 0 schema reaches `"007_add_mcp_approvals"` without error (migration chain: 001→002→003→004→005→006→007). (F6 correction)
 8. All six GitHubConfirmation named tests pass: `test_github_confirmation_persisted_to_db`, `test_confirmation_expires_after_ttl`, `test_replay_rejected_after_use`, `test_parameter_mismatch_rejected`, `test_concurrent_consumption_safe`, `test_recovery_after_github_api_failure`. (F2 correction)
+9. `test_github_confirmation_not_restored_after_api_failure` passes (F9 correction).
+10. `test_mcp_approval_consume_atomic_safe` passes (F6 correction).
 
 **Definition of Done:** All files committed; all criteria verified; full verification output recorded in commit message.

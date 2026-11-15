@@ -1,18 +1,19 @@
 # DevFlow AI — Phase 1: Functional Orchestration Requirements
 
-**Version:** 1.3.0
+**Version:** 1.4.0
 **Status:** Corrected — Awaiting Final Independent Review
 **Scope:** Phase 1 — Functional Orchestration
 **Branch:** feature/phase1-specification-planning
 **Base commit:** aaaaacb703124fc31b0e757b2bf1739c4fb225c9
-**Last Updated:** [current correction pass — implementer fills date at commit time]
-**Supersedes:** v1.2.0 (F1–F5 and D1–D4 final specification corrections applied — see .agents/tasks/phase1-final-spec-correction-report.md)
+**Last Updated:** 2026-11-15
+**Supersedes:** v1.3.0 (F1–F3 corrections applied — see .agents/tasks/phase1-v1.4.0-correction-report.md)
 
 **Version history:**
 - v1.0.0 — Initial specification
 - v1.1.0 — Eight independent-review findings applied (see docs/reviews/phase1-specification-review.md §11)
 - v1.2.0 — Five amendment-round findings applied (see docs/reviews/phase1-specification-review.md §13)
 - v1.3.0 — Final specification correction: F1–F5 applied (FK test split, GitHubConfirmation persistence, MCP authorization consistency, superseded guidance labelled, metadata corrected)
+- v1.4.0 — 2026-11-15 — Corrections F1 (MCP approval authorization via approval_request_id), F2 (FK cascade test corrections), F3 (metadata), F6 (MCPApproval dedicated schema), F7 (outdated MCP authorization references), F8 (Wave 1 FK tests), F9 (approval consumption and external failure handling). Branch: feature/phase1-specification-planning, Base: aaaaacb703124fc31b0e757b2bf1739c4fb225c9.
 
 ---
 
@@ -244,10 +245,11 @@ THEN a `WorkflowAuditLog` SQLAlchemy model MUST exist in `src/devflow_api/models
 | `mcp_approval_requested` | `MCPService` before calling a consequential/unknown tool | `"system"` |
 | `mcp_approval_granted` | Approval resolved as approved for an MCP tool call | `"user"` |
 | `mcp_approval_denied` | Approval explicitly rejected by a human approver for an MCP tool call (NOT expiry — expiry emits `mcp_approval_expired`) | `"user"` |
-| `mcp_approval_expired` | `ApprovalRecord.expires_at` elapsed before use — TTL timeout, NOT a human rejection | `"system"` |
-| `mcp_approval_missing` | No `ApprovalRecord` found when a consequential/unknown tool call is attempted | `"system"` |
-| `mcp_tool_invoked` | Successful `MCPClient.call_tool` completion | `"system"` |
-| `mcp_tool_failed` | `MCPClient.call_tool` raises any exception | `"system"` |
+| `mcp_approval_expired` | `MCPApproval.expires_at` elapsed before use — TTL timeout, NOT a human rejection | `"system"` |
+| `mcp_approval_missing` | No `MCPApproval` found when a consequential/unknown tool call is attempted | `"system"` |
+| `mcp_tool_invoked` | `MCPClient.call_tool` launched (approval consumed, subprocess launched) | `"system"` |
+| `mcp_tool_completed` | `MCPClient.call_tool` returned success — DISTINCT from `mcp_tool_invoked` | `"system"` |
+| `mcp_tool_failed` | `MCPClient.call_tool` raises any exception or times out | `"system"` |
 
 **Acceptance Criteria:**
 W1.7.1 — `WorkflowAuditLog` is importable from `devflow_api.models.audit`.
@@ -257,7 +259,7 @@ W1.7.4 — Calling `ApprovalService.request_approval` generates an audit log ent
 W1.7.5 — Resolving an `ApprovalRequest` generates an audit log entry with `event_type = "approval_resolved"`.
 W1.7.6 — `GET /api/v1/workflow-runs/{run_id}/audit` returns the full audit log for a run, ordered by `created_at` ascending.
 W1.7.7 — Issuing a `GitHubConfirmation` logs `github_confirmation_issued`; executing the action logs `github_action_authorized` and `github_action_executed`; rejecting a confirmation logs `github_action_rejected`.
-W1.7.8 — MCP service operations log the seven MCP audit events defined in REQ-M1.7 (`mcp_approval_requested`, `mcp_approval_granted`, `mcp_approval_denied`, `mcp_approval_expired`, `mcp_approval_missing`, `mcp_tool_invoked`, `mcp_tool_failed`). `mcp_approval_denied` MUST NOT be emitted on expiry; `mcp_approval_expired` MUST be emitted instead.
+W1.7.8 — MCP service operations log the eight MCP audit events defined in REQ-M1.7 (`mcp_approval_requested`, `mcp_approval_granted`, `mcp_approval_denied`, `mcp_approval_expired`, `mcp_approval_missing`, `mcp_tool_invoked`, `mcp_tool_completed`, `mcp_tool_failed`). `mcp_approval_denied` MUST NOT be emitted on expiry; `mcp_approval_expired` MUST be emitted instead. `mcp_tool_completed` is DISTINCT from `mcp_tool_invoked`.
 
 ---
 
@@ -402,63 +404,141 @@ M1.6.4 — `MCPLiveAdapter.health_check()` returns `{"status": "ok", ...}` when 
 
 ### REQ-M1.7
 WHEN an MCP tool call is evaluated for approval,
-THEN every MCP tool MUST be classified as `read_only`, `consequential`, or `unknown` before invocation, and a default-deny policy MUST apply to `consequential` and `unknown` tools. Approval MUST originate from a persisted `ApprovalRequest` record retrieved by `MCPService` from `ApprovalRequestRepository` — the caller supplies only an `approval_request_id` (UUID string); the caller may NOT supply a pre-constructed approval object.
+THEN every MCP tool MUST be classified as `read_only`, `consequential`, or `unknown` before invocation, and a default-deny policy MUST apply to `consequential` and `unknown` tools. Approval MUST originate from a persisted `MCPApproval` record (in the `mcp_approvals` table, UUID PK) retrieved by `MCPService` from `MCPApprovalRepository` — the caller supplies only an `mcp_approval_id` (UUID); the caller may NOT supply a pre-constructed approval object.
 
-**Mandatory 8-step authorization sequence (F1 correction — applies to every MCP tool call through MCPService):**
+**Separation of approval systems:** The workflow `approval_requests` table (integer PK, `ApprovalRequest` model) is used exclusively for workflow step approval gates (REQ-W1.3, REQ-W1.6). It is NOT used for MCP tool authorization. `MCPApproval` (UUID PK, `mcp_approvals` table) is the sole authorization record for MCP consequential tool invocations. These two systems are independent and must not be conflated.
+
+**Mandatory 9-step authorization sequence (F6/F7 correction — applies to every MCP tool call through MCPService):**
 1. Verify MCP server is configured and enabled in `MCPServerConfig`.
 2. Verify requested tool is on the allow-list (`MCPServerConfig.allowed_tools`). Deny → `MCPPermissionError`.
 3. Classify tool as `read_only`, `consequential`, or `unknown`.
 4. Default `unknown` → `consequential` (deny-by-default policy).
-5. For `consequential`/`unknown` tools: retrieve `ApprovalRequest` from `ApprovalRequestRepository` by `approval_request_id`. If `approval_request_id` is absent or no record is found → log `mcp_approval_missing`, raise `MCPApprovalRequiredError`. MCPService performs this retrieval internally — the caller MUST NOT pass a pre-built approval object.
-6. Validate the retrieved `ApprovalRequest`: (a) `status` MUST be `APPROVED`; (b) `expires_at` MUST be in the future — if expired, log `mcp_approval_expired`, raise `MCPApprovalExpiredError` (never `mcp_approval_denied`); (c) `mcp_server_id`, `tool_name`, `arguments_hash`, and `actor_id` MUST match the current invocation — mismatch → `MCPApprovalRequiredError`; (d) record MUST NOT already be `CONSUMED` — if consumed, raise `MCPApprovalRequiredError` (replay prevention). Atomically set status to `CONSUMED` with `consumed_at = now(UTC)` in a single DB transaction before proceeding. Log `mcp_approval_granted`.
-7. Execute only through `MCPService` gateway — no direct `MCPClient` calls from routers, adapters, or any other layer.
-8. Record all required audit events without leaking credentials or argument values.
+5. For `consequential`/`unknown` tools: retrieve `MCPApproval` from `MCPApprovalRepository` by `mcp_approval_id`. If `mcp_approval_id` is absent or no record is found → log `mcp_approval_missing`, raise `MCPApprovalRequiredError`. MCPService performs this retrieval internally — the caller MUST NOT pass a pre-built approval object.
+6. Validate the retrieved `MCPApproval`: (a) `status` MUST be `APPROVED`; (b) `expires_at` MUST be in the future — if expired, log `mcp_approval_expired`, raise `MCPApprovalExpiredError` (never `mcp_approval_denied`); (c) `mcp_server_id`, `tool_name`, `arguments_hash`, and `actor_id` MUST match the current invocation — mismatch → `MCPApprovalRequiredError`; (d) record MUST NOT already be `CONSUMED` — if consumed, raise `MCPApprovalRequiredError` (replay prevention).
+7. Call `MCPApprovalRepository.consume_atomic(mcp_approval_id)` — atomically sets `status = CONSUMED` and `consumed_at = now(UTC)` via `UPDATE WHERE status = 'APPROVED' AND id = ?`. If 0 rows updated (already consumed), raises `ConsumedError`. Log `mcp_approval_granted`.
+8. Execute only through `MCPService` gateway — no direct `MCPClient` calls from routers, adapters, or any other layer. Invoke `MCPClient.call_tool`.
+9. Record all required audit events without leaking credentials or argument values. Log `mcp_tool_invoked` on success; `mcp_tool_failed` on exception, with `mcp_approval_id` reference.
+
+**Note on step 7:** Step 7 (consume_atomic) is explicitly separated from step 6 (validation) because atomic consumption is the last gate before execution. A consumed approval cannot be replayed regardless of execution outcome — see REQ-M2.4.
 
 **Allow-list clarification:** `MCPServerConfig.allowed_tools` is a configuration-time permission control, not a per-invocation human approval. It restricts which tool names may be invoked. It is NOT sufficient authorization for consequential actions — both allow-list AND human approval checks are required (additive and sequential).
 
 **Additive sequential checks (both must pass):**
 1. Allow-list check (`MCPPermissionError` if denied) — from REQ-M1.4.
-2. Classification + approval gate check (`MCPApprovalRequiredError` if consequential/unknown without a valid, persisted, unconsumed `ApprovalRequest`) — from this requirement.
+2. Classification + approval gate check (`MCPApprovalRequiredError` if consequential/unknown without a valid, persisted, unconsumed `MCPApproval`) — from this requirement and REQ-M2.x.
 
-**ApprovalRequest record (MCP-specific, persisted to DB):** `MCPService` reads from an `ApprovalRequest` record with the following fields: `id` (UUID, primary key), `mcp_server_id` (str), `tool_name` (str), `arguments_hash` (SHA-256 of JSON-serialised arguments), `actor_id` (str), `workflow_run_id` (int | None), `status` (`PENDING` | `APPROVED` | `REJECTED` | `EXPIRED` | `CONSUMED`), `created_at` (UTCDateTime), `expires_at` (UTCDateTime), `consumed_at` (UTCDateTime | None — set atomically on consumption).
-
-**Caller contract:** The caller passes `approval_request_id: str` (UUID). `MCPService` retrieves and validates the record internally. No caller may fabricate or pass a pre-constructed approval object to bypass this gate.
+**Caller contract:** The caller passes `mcp_approval_id: UUID | None`. `MCPService` retrieves and validates the `MCPApproval` record from `MCPApprovalRepository` internally. No caller may fabricate or pass a pre-constructed approval object to bypass this gate.
 
 **Required audit events (persisted to `workflow_audit_log`):**
 
 | Event type | Trigger | Actor |
 |---|---|---|
 | `mcp_approval_requested` | `MCPService` before calling a consequential/unknown tool, requesting human approval | `"system"` |
-| `mcp_approval_granted` | `ApprovalRequest` retrieved, validated, and atomically consumed for an MCP tool call | `"user"` |
-| `mcp_approval_denied` | An `ApprovalRequest` for an MCP tool call is **explicitly rejected** by a human approver (NOT expiry) | `"user"` |
-| `mcp_approval_expired` | `ApprovalRequest.expires_at` elapsed before use — TTL timeout, **NOT** a human rejection | `"system"` |
-| `mcp_approval_missing` | No `ApprovalRequest` found (absent `approval_request_id` or record not in DB) when a consequential/unknown tool call is attempted | `"system"` |
-| `mcp_tool_invoked` | Successful `MCPClient.call_tool` completion | `"system"` |
-| `mcp_tool_failed` | `MCPClient.call_tool` raises any exception | `"system"` |
+| `mcp_approval_granted` | `MCPApproval` retrieved, validated, and atomically consumed for an MCP tool call | `"user"` |
+| `mcp_approval_denied` | An `MCPApproval` for an MCP tool call is **explicitly rejected** by a human approver (NOT expiry) | `"user"` |
+| `mcp_approval_expired` | `MCPApproval.expires_at` elapsed before use — TTL timeout, **NOT** a human rejection | `"system"` |
+| `mcp_approval_missing` | No `MCPApproval` found (absent `mcp_approval_id` or record not in DB) when a consequential/unknown tool call is attempted | `"system"` |
+| `mcp_tool_invoked` | `MCPClient.call_tool` launched (approval consumed, subprocess launched) | `"system"` |
+| `mcp_tool_completed` | `MCPClient.call_tool` returned success | `"system"` |
+| `mcp_tool_failed` | `MCPClient.call_tool` raises any exception or times out | `"system"` |
 
 **Acceptance Criteria:**
-M1.7.1 — `MCPService.invoke_tool` accepts `approval_request_id: str | None` (not an `ApprovalRecord` object). For `consequential`/`unknown` tools, the caller MUST supply an `approval_request_id`; passing a pre-constructed approval object is not supported and MUST NOT be accepted.
-M1.7.2 — `MCPService` retrieves the `ApprovalRequest` from `ApprovalRequestRepository` by `approval_request_id`. If the record is not found, it logs `mcp_approval_missing` and raises `MCPApprovalRequiredError` (HTTP 403, code `MCP_APPROVAL_REQUIRED`).
-M1.7.3 — `MCPService` rejects the `ApprovalRequest` if `status != APPROVED`, logs `mcp_approval_missing`, and raises `MCPApprovalRequiredError`.
-M1.7.4 — `MCPService` rejects the `ApprovalRequest` if `expires_at` is in the past, logs `mcp_approval_expired`, and raises `MCPApprovalExpiredError` (HTTP 422, code `MCP_APPROVAL_EXPIRED`). It MUST NOT log `mcp_approval_denied`.
-M1.7.5 — `MCPService` rejects the invocation if `mcp_server_id`, `tool_name`, `arguments_hash`, or `actor_id` on the `ApprovalRequest` do not match the current call, and raises `MCPApprovalRequiredError`.
-M1.7.6 — `MCPService` rejects a replay: if the `ApprovalRequest` already has `status = CONSUMED`, it raises `MCPApprovalRequiredError` without executing the tool.
-M1.7.7 — Atomic consumption: `MCPService` sets `ApprovalRequest.status = CONSUMED` and `consumed_at = now(UTC)` in a single DB transaction (via `ApprovalRequestRepository.consume_atomic`) before launching the subprocess. Two concurrent calls with the same `approval_request_id` MUST result in exactly one success and one `MCPApprovalRequiredError`.
-M1.7.8 — A tool classified as `read_only` proceeds without an `approval_request_id` (subject to allow-list check only).
-M1.7.9 — Allow-list alone is NOT sufficient for consequential tool execution; human approval is also required. A test verifies a tool that passes allow-list check but lacks an `ApprovalRequest` record is still denied.
-M1.7.10 — All seven MCP audit events (`mcp_approval_requested`, `mcp_approval_granted`, `mcp_approval_denied`, `mcp_approval_expired`, `mcp_approval_missing`, `mcp_tool_invoked`, `mcp_tool_failed`) are logged to `workflow_audit_log`.
+M1.7.1 — `MCPService.invoke_tool` accepts `mcp_approval_id: UUID | None` (not an `ApprovalRecord` or `MCPApproval` object). For `consequential`/`unknown` tools, the caller MUST supply an `mcp_approval_id`; passing a pre-constructed approval object is not supported and MUST NOT be accepted.
+M1.7.2 — `MCPService` retrieves the `MCPApproval` from `MCPApprovalRepository` by `mcp_approval_id`. If the record is not found, it logs `mcp_approval_missing` and raises `MCPApprovalRequiredError` (HTTP 403, code `MCP_APPROVAL_REQUIRED`).
+M1.7.3 — `MCPService` rejects the `MCPApproval` if `status != APPROVED`, logs `mcp_approval_missing`, and raises `MCPApprovalRequiredError`.
+M1.7.4 — `MCPService` rejects the `MCPApproval` if `expires_at` is in the past, logs `mcp_approval_expired`, and raises `MCPApprovalExpiredError` (HTTP 422, code `MCP_APPROVAL_EXPIRED`). It MUST NOT log `mcp_approval_denied`.
+M1.7.5 — `MCPService` rejects the invocation if `mcp_server_id`, `tool_name`, `arguments_hash`, or `actor_id` on the `MCPApproval` do not match the current call, and raises `MCPApprovalRequiredError`.
+M1.7.6 — `MCPService` rejects a replay: if the `MCPApproval` already has `status = CONSUMED`, it raises `MCPApprovalRequiredError` without executing the tool.
+M1.7.7 — Atomic consumption: `MCPService` calls `MCPApprovalRepository.consume_atomic(mcp_approval_id)` in a single DB transaction (UPDATE WHERE status='APPROVED' AND id=?) before launching the subprocess. Two concurrent calls with the same `mcp_approval_id` MUST result in exactly one success and one `MCPApprovalRequiredError`.
+M1.7.8 — A tool classified as `read_only` proceeds without an `mcp_approval_id` (subject to allow-list check only).
+M1.7.9 — Allow-list alone is NOT sufficient for consequential tool execution; human approval is also required. A test verifies a tool that passes allow-list check but lacks an `MCPApproval` record is still denied.
+M1.7.10 — All eight MCP audit events (`mcp_approval_requested`, `mcp_approval_granted`, `mcp_approval_denied`, `mcp_approval_expired`, `mcp_approval_missing`, `mcp_tool_invoked`, `mcp_tool_completed`, `mcp_tool_failed`) are logged to `workflow_audit_log`.
 M1.7.11 — No code path in `MCPAdapter`, `MCPRouter`, or any other layer calls `MCPClient.call_tool` directly without going through `MCPService.invoke_tool`.
-M1.7.12 — `test_expired_mcp_approval_emits_approval_expired_event` — verifies an expired `ApprovalRequest` emits `mcp_approval_expired`, NOT `mcp_approval_denied`.
+M1.7.12 — `test_expired_mcp_approval_emits_approval_expired_event` — verifies an expired `MCPApproval` emits `mcp_approval_expired`, NOT `mcp_approval_denied`.
 
 **Named tests (all 8 MUST be present in the MCP test suite):**
-- `test_forged_approval_record_rejected` — verifies a caller cannot bypass the gate by constructing an in-memory approval object; `MCPService` only accepts `approval_request_id`
-- `test_expired_approval_rejected_at_invocation` — `ApprovalRequest.expires_at` in the past raises `MCPApprovalExpiredError`
-- `test_mismatched_tool_name_rejected` — `ApprovalRequest.tool_name` differs from invoked tool → `MCPApprovalRequiredError`
-- `test_mismatched_arguments_hash_rejected` — `ApprovalRequest.arguments_hash` does not match SHA-256 of supplied arguments → `MCPApprovalRequiredError`
-- `test_replay_after_consumption_rejected` — second call with an already-`CONSUMED` `ApprovalRequest` → `MCPApprovalRequiredError`
-- `test_concurrent_consumption_safe` — two concurrent `invoke_tool` calls with the same `approval_request_id` result in exactly one success and one `MCPApprovalRequiredError` (atomic consumption)
-- `test_read_only_tool_no_approval_required` — `read_only` classified tool proceeds without `approval_request_id`
+- `test_forged_approval_record_rejected` — verifies a caller cannot bypass the gate by constructing an in-memory approval object; `MCPService` only accepts `mcp_approval_id` and retrieves `MCPApproval` from `MCPApprovalRepository`
+- `test_expired_approval_rejected_at_invocation` — `MCPApproval.expires_at` in the past raises `MCPApprovalExpiredError`
+- `test_mismatched_tool_name_rejected` — `MCPApproval.tool_name` differs from invoked tool → `MCPApprovalRequiredError`
+- `test_mismatched_arguments_hash_rejected` — `MCPApproval.arguments_hash` does not match SHA-256 of supplied arguments → `MCPApprovalRequiredError`
+- `test_replay_after_consumption_rejected` — second call with an already-`CONSUMED` `MCPApproval` → `MCPApprovalRequiredError`
+- `test_concurrent_consumption_safe` — two concurrent `invoke_tool` calls with the same `mcp_approval_id` result in exactly one success and one `MCPApprovalRequiredError` (atomic consumption via `consume_atomic`)
+- `test_read_only_tool_no_approval_required` — `read_only` classified tool proceeds without `mcp_approval_id`
 - `test_no_direct_mcp_client_bypass` — integration test verifying no router or adapter calls `MCPClient.call_tool` directly without going through `MCPService.invoke_tool`
+
+---
+
+## Area 4b — MCPApproval Model and Repository (F6 Correction)
+
+**Separation note:** The `approval_requests` table (integer PK, `ApprovalRequest` model) is used exclusively for workflow step approval gates. It is NOT used for MCP tool authorization. The `mcp_approvals` table (UUID PK, `MCPApproval` model) is the sole authorization record for MCP consequential tool invocations.
+
+### REQ-M2.1
+WHEN a consequential MCP tool invocation is authorized,
+THEN an `MCPApproval` SQLAlchemy model MUST exist in `src/devflow_api/models/mcp_approval.py` with the following columns: `id` (TEXT PK — UUID stored as text), `mcp_server_id` (TEXT NOT NULL — matches `MCPServerConfig.name`), `tool_name` (TEXT NOT NULL), `arguments_hash` (TEXT NOT NULL — SHA-256 of canonical JSON of arguments), `actor_id` (TEXT NOT NULL — local user identifier), `workflow_run_id` (INTEGER nullable FK → workflow_runs.id ON DELETE SET NULL), `status` (TEXT, constrained to `PENDING | APPROVED | REJECTED | EXPIRED | CONSUMED`), `requested_at` (UTCDateTime NOT NULL), `resolved_at` (UTCDateTime nullable — set when status moves to APPROVED or REJECTED), `expires_at` (UTCDateTime NOT NULL), `consumed_at` (UTCDateTime nullable — set atomically on consumption).
+
+**Valid status transitions:**
+- `PENDING` → `APPROVED` (human resolves as approved)
+- `PENDING` → `REJECTED` (human resolves as rejected)
+- `APPROVED` → `CONSUMED` (atomic consumption on use, via `consume_atomic`)
+- `PENDING` → `EXPIRED` (TTL elapsed before resolution)
+- `APPROVED` → `EXPIRED` (TTL elapsed before consumption)
+
+**Acceptance Criteria:**
+M2.1.1 — `MCPApproval` is importable from `devflow_api.models.mcp_approval`.
+M2.1.2 — `status` column has a `CheckConstraint` enforcing exactly: `PENDING`, `APPROVED`, `REJECTED`, `EXPIRED`, `CONSUMED`.
+M2.1.3 — `workflow_run_id` is a nullable foreign key with `ON DELETE SET NULL`.
+M2.1.4 — `id` column is TEXT (UUID stored as text), primary key.
+M2.1.5 — All timestamp columns use `UTCDateTime` TypeDecorator.
+M2.1.6 — `mypy --strict src/devflow_api/models/mcp_approval.py` exits with code 0.
+
+### REQ-M2.2
+WHEN MCPApproval records are persisted and retrieved,
+THEN an `MCPApprovalRepository` MUST exist in `src/devflow_api/repositories/mcp_approval.py` with the following interface:
+- `create(approval: MCPApproval) → MCPApproval` — persists a new MCPApproval with status=PENDING.
+- `get_by_id(id: UUID) → MCPApproval | None` — retrieves by UUID.
+- `consume_atomic(id: UUID) → MCPApproval` — atomically sets `status = CONSUMED`, `consumed_at = now(UTC)` via `UPDATE WHERE status = 'APPROVED' AND id = ?`. Raises `ConsumedError` if 0 rows updated (already consumed or not found).
+- `list_pending(server_id: str) → list[MCPApproval]` — returns all PENDING approvals for a given server.
+
+**Acceptance Criteria:**
+M2.2.1 — `MCPApprovalRepository` is importable from `devflow_api.repositories.mcp_approval`.
+M2.2.2 — `consume_atomic` with a valid APPROVED record returns the updated record with `status = CONSUMED` and `consumed_at` set.
+M2.2.3 — `consume_atomic` with an already-CONSUMED record raises `ConsumedError` (0 rows updated).
+M2.2.4 — Two concurrent `consume_atomic` calls with the same id result in exactly one success and one `ConsumedError`.
+M2.2.5 — `mypy --strict src/devflow_api/repositories/mcp_approval.py` exits with code 0.
+
+### REQ-M2.3
+WHEN MCPService is constructed,
+THEN it MUST be injected with `mcp_approval_repo: MCPApprovalRepository` (NOT `approval_request_repo: ApprovalRequestRepository`). The `ApprovalRequestRepository` is used only for workflow step approvals (REQ-W1.3, REQ-W1.6) and MUST NOT be used by `MCPService`.
+
+**Acceptance Criteria:**
+M2.3.1 — `MCPService.__init__` signature includes `mcp_approval_repo: MCPApprovalRepository`.
+M2.3.2 — `MCPService.__init__` does NOT include `approval_request_repo: ApprovalRequestRepository`.
+M2.3.3 — `MCPService.invoke_tool` calls `self.mcp_approval_repo.consume_atomic(...)` not `self.approval_request_repo.consume_atomic(...)`.
+M2.3.4 — `mypy --strict src/devflow_api/services/mcp_service.py` exits with code 0.
+
+### REQ-M2.4
+WHEN a consequential MCP tool execution fails or times out,
+THEN the system MUST NOT automatically restore the `MCPApproval` to `APPROVED` status. Consumed approvals cannot be replayed regardless of execution outcome.
+
+**Failure semantics:**
+- An `MCPApproval` authorizes at most one execution attempt (enforced by `consume_atomic`).
+- Consumed approvals cannot be replayed regardless of execution outcome (success, failure, or timeout).
+- An execution failure does NOT restore the approval to `APPROVED` status.
+- Timeout or connection loss is treated as indeterminate (not confirmed success, not confirmed failure).
+- No automatic retry of a consequential action without a new explicit `MCPApproval`.
+
+**Audit requirements:**
+- Record `mcp_tool_invoked` (approval consumed, subprocess launched) with `mcp_approval_id` reference.
+- Record `mcp_tool_completed` (subprocess returned success) — this is DISTINCT from `mcp_tool_invoked`.
+- Record `mcp_tool_failed` (subprocess returned error or timed out) with `mcp_approval_id` reference.
+
+**User recovery flow:** After a failure or indeterminate outcome, the user may inspect the audit log and request a new `MCPApproval` for a retry. The new approval goes through the full approval flow (`PENDING` → `APPROVED`). Note: "DevFlow AI cannot guarantee exactly-once execution of external MCP tools. If the subprocess was launched but the result is unknown (timeout/crash), the user must verify the external state before approving a retry."
+
+**Acceptance Criteria:**
+M2.4.1 — `test_execution_failure_does_not_restore_approval` — after `mcp_tool_failed` audit event, the `MCPApproval` remains in `CONSUMED` status.
+M2.4.2 — `test_timeout_recorded_as_indeterminate_in_audit` — a subprocess timeout logs `mcp_tool_failed` with an indeterminate note; the approval is NOT restored.
+M2.4.3 — `test_new_approval_required_for_retry_after_failure` — a retry of a failed consequential tool call requires a new `MCPApproval` (a new `mcp_approval_id`); reusing the consumed one raises `MCPApprovalRequiredError`.
+M2.4.4 — `test_github_confirmation_not_restored_after_api_failure` — after a GitHub API call failure following confirmation consumption, the `GitHubConfirmation` remains consumed; a new confirmation must be issued for retry.
 
 ### REQ-M1.8
 WHEN the MCP Python SDK is used,
@@ -530,6 +610,8 @@ THEN `POST /api/v1/repositories/{repo_config_id}/branches` MUST support creating
 **Concurrent requests:** Two simultaneous requests attempting to consume the same `confirmation_id` MUST NOT both succeed. The `used_at` column is updated atomically; only the first request to set it proceeds to the GitHub API call.
 
 **Recovery/idempotency:** If the GitHub API call succeeds but the `used_at` update fails (e.g., transient DB error), the system MUST re-check GitHub state before issuing a new confirmation for the same operation (to avoid duplicate branch/PR creation). The idempotency key is the combination of `(confirmation_id, operation)`.
+
+**Failure semantics (F9 correction):** A `GitHubConfirmation` consumed (`used_at` set) means the action was attempted, not necessarily completed. GitHub API failure after confirmation consumption: record `github_action_failed` audit event; do NOT automatically restore the confirmation or retry. The user must verify GitHub state and issue a new `GitHubConfirmation` for retry. Note: "DevFlow AI cannot guarantee exactly-once execution of GitHub API operations. If the API call was made but the result is unknown, the user must verify the GitHub state before issuing a new confirmation."
 
 **Authorization model:** The `GitHubConfirmation` record is explicit user acknowledgement of the specific action with the specific parameters. Having a `GITHUB_TOKEN` credential in Settings is an authentication prerequisite, not authorization. The credential allows the GitHub API call to authenticate; the confirmation record is the authorization gate. Never treat a client-supplied boolean as sufficient authorization.
 
@@ -643,13 +725,14 @@ THEN dedicated Alembic migrations MUST be authored for each new table group intr
 | `004_add_approval_audit_tables.py` | `"004_add_approval_audit_tables"` | `"003_add_workflow_tables"` | approval_requests, workflow_audit_log | Wave 2 |
 | `005_add_repository_tables.py` | `"005_add_repository_tables"` | `"004_add_approval_audit_tables"` | repository_configs | Wave 2 |
 | `006_add_github_confirmations.py` | `"006_add_github_confirmations"` | `"005_add_repository_tables"` | github_confirmations | Wave 5 |
+| `007_add_mcp_approvals.py` | `"007_add_mcp_approvals"` | `"006_add_github_confirmations"` | mcp_approvals | Wave 5 |
 
-**Revision chain:** `001_create_initial_tables` → `002_add_project_tags_column` → `003_add_workflow_tables` → `004_add_approval_audit_tables` → `005_add_repository_tables` → `006_add_github_confirmations`
+**Revision chain:** `001_create_initial_tables` → `002_add_project_tags_column` → `003_add_workflow_tables` → `004_add_approval_audit_tables` → `005_add_repository_tables` → `006_add_github_confirmations` → `007_add_mcp_approvals`
 
 Each migration's `revision` string MUST exactly match the value in the table above. Each migration's `down_revision` string MUST exactly match the preceding revision's `revision` string.
 
 **Acceptance Criteria:**
-DB1.1.1 — `alembic upgrade head` from a Phase 0 schema (head = `001_create_initial_tables`) applies all five Phase 1 migrations in order: 002, 003, 004, 005, 006.
+DB1.1.1 — `alembic upgrade head` from a Phase 0 schema (head = `001_create_initial_tables`) applies all six Phase 1 migrations in order: 002, 003, 004, 005, 006, 007.
 DB1.1.2 — `alembic downgrade -1` from head undoes the most recent migration without error.
 DB1.1.3 — Each migration has a non-trivial `downgrade()` (not `pass`).
 DB1.1.4 — Migration files are hand-authored; `alembic revision --autogenerate` output MUST be reviewed and edited before commit.
@@ -672,13 +755,13 @@ THEN `PRAGMA foreign_keys=ON` MUST be executed on every connection immediately a
 
 **Implementation location:** The PRAGMA must be added to the SQLAlchemy `'connect'` event handler in `src/devflow_api/database.py`. The existing `alembic/env.py` already registers a `'connect'` event for `PRAGMA journal_mode=WAL`; the `PRAGMA foreign_keys=ON` must be added to the same handler in that file during implementation (note: `alembic/env.py` is out of specification-correction scope and will be updated by the implementer alongside `database.py`).
 
-**Acceptance Criteria (split by wave — F1 correction):**
+**Acceptance Criteria (split by wave — F6/F8 correction):**
 
-*Wave 1 (Task P6 — uses only Wave 1 tables: projects, project_tags if applicable):*
+*Wave 1 (Task P6 — uses only Wave 1 tables: projects; no Wave 2 tables):*
 DB1.3.1 — Every SQLite connection opened by the application executes `PRAGMA foreign_keys=ON` before any query runs.
-DB1.3.2 — `test_foreign_key_pragma_enabled_on_connection` verifies the PRAGMA is active by querying `PRAGMA foreign_keys` and asserting the result is `1`. This test uses only Wave 1 tables and is independently satisfiable before Wave 2 exists.
-DB1.3.3 — `test_wave1_cascade_delete_enforced` verifies that deleting a `Project` cascades to delete its associated `Tag`/`ProjectTag` records (or any child record reachable via Wave 1 tables only). This test does NOT reference `WorkflowRun`, `WorkflowAuditLog`, or any Wave 2+ table.
-DB1.3.4 — `test_wave1_insert_invalid_foreign_key_raises_integrity_error` verifies that inserting a row referencing a non-existent `project_id` (e.g., a `repository_configs` row if present, or any Wave 1 FK relationship) raises `IntegrityError` with `PRAGMA foreign_keys=ON`.
+DB1.3.2 — `test_foreign_key_pragma_enabled_on_connection` verifies the PRAGMA is active by querying `PRAGMA foreign_keys` and asserting the result is `1`. This test uses only a live test connection (in-memory SQLite) and is independently satisfiable before Wave 2 exists.
+DB1.3.3 — `test_fk_enforcement_with_wave1_tables` verifies that inserting a row with an invalid parent FK raises `IntegrityError` with `PRAGMA foreign_keys=ON`. Use `repository_configs.project_id → projects.id` as the FK relationship if `repository_configs` is accessible (created by migration 005, Wave 2). If Wave 2 tables are not available in a Wave 1 test run, create a minimal in-memory `sa.Table` with a FK to `projects` to verify PRAGMA FK enforcement without depending on Wave 2 tables. This test does NOT reference `WorkflowRun`, `WorkflowAuditLog`, or any Wave 2 model class.
+DB1.3.4 — `test_migration_002_upgrade_downgrade` — applies `alembic upgrade` to revision 002 and downgrades back to base; asserts no error occurs. Uses `tmp_path`-scoped SQLite file, not `devflow.db`.
 
 *Wave 2 (Task W6 — uses Wave 2 tables: workflows, workflow_runs, workflow_audit_log):*
 DB1.3.5 — `test_delete_project_sets_workflow_project_id_null` verifies that deleting a `Project` sets `Workflow.project_id` to `NULL` (`ON DELETE SET NULL` — Project deletion does NOT cascade to WorkflowRuns; requires Wave 2 tables — deferred to Wave 2 Task W6).
@@ -699,7 +782,7 @@ ALL consequential actions (branch creation, PR creation, file writes, subprocess
 - Having `GITHUB_TOKEN` in `Settings` is an authentication prerequisite — it allows GitHub API calls to authenticate. It is NOT an authorization decision.
 - Authorization for consequential GitHub actions is granted by: a valid, unexpired, unused `GitHubConfirmation` record (direct API call path) or `ApprovalRequest.status == "approved"` (workflow path).
 - `MCPServerConfig.allowed_tools` is a configuration-time permission control. It restricts which tool names may be invoked; it is not a per-invocation human approval.
-- MCP `consequential` and `unknown` tool calls additionally require an `ApprovalRecord` as defined in REQ-M1.7.
+- MCP `consequential` and `unknown` tool calls additionally require an `MCPApproval` as defined in REQ-M1.7 and REQ-M2.x. The `MCPApproval` is retrieved from `MCPApprovalRepository` by `mcp_approval_id` — the caller never supplies the approval object itself.
 
 **Acceptance Criteria:**
 S1.1.1 — Branch creation without a valid `confirmation_id` returns HTTP 422.
