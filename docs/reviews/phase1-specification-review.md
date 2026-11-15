@@ -762,3 +762,79 @@ All four findings (F6 MCPApproval schema conflict, F7 outdated MCP authorization
 - `docs/planning/phase1-roadmap.md` (v1.4.0, F6–F9)
 - `docs/reviews/phase1-specification-review.md` (v1.4.0 — this document, §17 added)
 - `.agents/tasks/phase1-v1.4-final-security-schema-correction-report.md` (new — full correction report)
+
+---
+
+## 18. Migration and Dependency Alignment Pass (v1.5.0)
+
+This section records the migration renaming and wave reassignment alignment pass that produced v1.5.0 of all five spec documents. The full alignment report is in `.agents/tasks/phase1-final-migration-alignment-report.md`.
+
+### Migration Renaming (006↔007 Swap)
+
+**Problem:** Migration 006 was named `006_add_github_confirmations` (Wave 5) and migration 007 was named `007_add_mcp_approvals` (Wave 5). Wave 4 required persisted MCP approvals, but the MCP approval migration and all related models were assigned to Wave 5. This created a forward dependency: Wave 4 MCPService could not reference a Wave 5 migration and table.
+
+**Correction applied:**
+
+| Migration | Before v1.5.0 | After v1.5.0 |
+|---|---|---|
+| 006 | `006_add_github_confirmations` — Wave 5 | `006_add_mcp_approvals` — **Wave 4** |
+| 007 | `007_add_mcp_approvals` — Wave 5 | `007_add_github_confirmations` — Wave 5 |
+| 007 down_revision | `006_add_github_confirmations` | `006_add_mcp_approvals` |
+
+All five documents updated: migration chain diagrams, revision tables, task deliverables, wave completion gates, file layout (§13), and traceability matrix (§19).
+
+### Wave Reassignment
+
+The following items moved from Wave 5 to Wave 4 (Task I4):
+- `MCPApproval` SQLAlchemy model (`src/devflow_api/models/mcp_approval.py`)
+- `MCPApprovalRepository` (`src/devflow_api/repositories/mcp_approval.py`)
+- Migration `006_add_mcp_approvals` (`alembic/versions/006_add_mcp_approvals.py`) with `down_revision = "005_add_repository_tables"`
+
+Wave 5 (Task G1) retains:
+- Migration `007_add_github_confirmations` with `down_revision = "006_add_mcp_approvals"`
+- `GitHubConfirmation` SQLAlchemy model
+- `GitHubConfirmationRepository`
+
+### Task I4 Corrections Summary
+
+- Added MCPApproval model, MCPApprovalRepository, and migration 006 as Wave 4 deliverables
+- Removed any reference to ApprovalRequestRepository in the MCP authorization path
+- Removed any reference to Wave 5 migration in Wave 4 deliverables
+- Task I4 acceptance criterion I4.17 added: Wave 4 is independently applicable without any Wave 5 migration existing
+- ApprovalRequest/ApprovalRepository/ApprovalService remain strictly for workflow step approval gates
+
+### Design §7.5 and §13 Updates
+
+- §7.5 MCPService: `mcp_approval_repo: MCPApprovalRepository` (NOT `ApprovalRequestRepository`); `mcp_approval_id: UUID | None` (NOT `approval_request_id`)
+- §13 file layout: `mcp_approval.py` moved to Wave 4 section; `006_add_mcp_approvals.py` annotated as Wave 4 Task I4
+- Explicit statements added: "No router, adapter, or Streamlit handler may import or instantiate MCPClient directly." and "MCPService retrieves and validates MCPApproval from MCPApprovalRepository before any consequential tool invocation."
+
+### Nine-Check Consistency Results (v1.5.0)
+
+| # | Check | Result |
+|---|---|---|
+| 1 | 7 migrations form one linear chain: 001→002→003→004→005→006→007, no gaps, no forks | **PASS** |
+| 2 | Wave 1 requires no Wave 2–5 deliverables | **PASS** |
+| 3 | Wave 2 requires no Wave 3–5 deliverables | **PASS** |
+| 4 | Wave 3 requires no Wave 4–5 deliverables | **PASS** |
+| 5 | Wave 4 requires no Wave 5 deliverables | **PASS** |
+| 6 | MCP consequential actions require persisted MCPApproval (migration 006, Wave 4) | **PASS** |
+| 7 | GitHub branch/PR creation requires persisted GitHubConfirmation (migration 007, Wave 5) | **PASS** |
+| 8 | Coverage gate consistent: `pytest -v --cov=src --cov-branch --cov-fail-under=80 --cov-report=term-missing` | **PASS** |
+| 9 | No autonomous workflow execution in Phase 1 | **PASS** |
+
+**All 9 checks PASS.**
+
+### Updated Final Verdict
+
+**READY FOR INDEPENDENT REVIEW** (v1.5.0)
+
+All migration alignment corrections applied. All 9 consistency checks pass. All prior findings from §11 (8 findings), §13 (5 amendments), §15 (F1–F5, D1–D4), §16 (F1–F3), and §17 (F6–F9) remain resolved. The seven-migration linear chain is correctly specified. Wave 4 owns migration 006 and all MCP approval infrastructure. Wave 4 has no dependency on any Wave 5 deliverable. Specification is internally consistent at v1.5.0.
+
+**Changed files (v1.5.0 migration alignment pass):**
+- `.kiro/specs/phase1-functional-orchestration/requirements.md` (v1.5.0)
+- `.kiro/specs/phase1-functional-orchestration/design.md` (v1.5.0)
+- `.kiro/specs/phase1-functional-orchestration/tasks.md` (v1.5.0)
+- `docs/planning/phase1-roadmap.md` (v1.5.0)
+- `docs/reviews/phase1-specification-review.md` (v1.5.0 — this document, §18 added)
+- `.agents/tasks/phase1-final-migration-alignment-report.md` (new — alignment report)

@@ -14,6 +14,7 @@
 - v1.2.0 — Five amendment-round findings applied
 - v1.3.0 — Final specification correction: F1–F5 and D1–D4 applied (FK test split to Wave 1 / Wave 2, GitHubConfirmation persistence + migration 006 + 6 named tests in Wave 5, MCP 8-step sequence + 3 new audit events + named test, superseded guidance labelled, metadata corrected)
 - v1.4.0 — 2026-11-15 — Corrections F1 (MCP approval authorization via approval_request_id), F2 (FK cascade test corrections), F3 (metadata), F6 (MCPApproval dedicated schema + migration 007), F7 (outdated MCP authorization references), F8 (Wave 1 FK tests), F9 (approval consumption and external failure handling). Branch: feature/phase1-specification-planning, Base: aaaaacb703124fc31b0e757b2bf1739c4fb225c9.
+- v1.5.0 — Migration and dependency alignment: 006=mcp_approvals (Wave 4, Task I4); 007=github_confirmations (Wave 5, Task G1); Task I4 deliverables updated (MCPApproval model/repo/migration 006 moved here from G1); Task G1 updated (migration 007, GitHubConfirmation only); down_revision chain corrected throughout. Branch: feature/phase1-specification-planning.
 
 ---
 
@@ -802,7 +803,7 @@ Implement `src/devflow_api/adapters/live/ollama.py` and `src/devflow_api/adapter
 **Estimated size:** Large (4–6 hours)
 
 **Description:**
-Implement `src/devflow_api/adapters/mcp_client.py` with `MCPServerConfig`, `MCPClient`, `MCPToolResult`, and secret interpolation. Implement `src/devflow_api/adapters/live/mcp_live.py` with `MCPLiveAdapter`. Implement `src/devflow_api/services/mcp_service.py` with `MCPService` (the approval gate layer). Implement `src/devflow_api/repositories/approval_request.py` with `ApprovalRequestRepository`. Add `mcp>=1.0,<2.0` to `requirements/base.txt`. Generate and commit a lockfile.
+Implement `src/devflow_api/adapters/mcp_client.py` with `MCPServerConfig`, `MCPClient`, `MCPToolResult`, and secret interpolation. Implement `src/devflow_api/adapters/live/mcp_live.py` with `MCPLiveAdapter`. Implement `src/devflow_api/services/mcp_service.py` with `MCPService` (the approval gate layer). Author migration `006_add_mcp_approvals.py` (Wave 4). Add `mcp>=1.0,<2.0` to `requirements/base.txt`. Generate and commit a lockfile.
 
 **Deliverables:**
 - `src/devflow_api/adapters/mcp_client.py`
@@ -810,10 +811,51 @@ Implement `src/devflow_api/adapters/mcp_client.py` with `MCPServerConfig`, `MCPC
 - `src/devflow_api/services/mcp_service.py` — MCPService (approval gate + audit events; uses MCPApprovalRepository)
 - `src/devflow_api/models/mcp_approval.py` — MCPApproval model (UUID PK, mcp_approvals table)
 - `src/devflow_api/repositories/mcp_approval.py` — MCPApprovalRepository (create, get_by_id, consume_atomic, list_pending)
-- `src/devflow_api/repositories/approval_request.py` — ApprovalRequestRepository (workflow step approvals only; NOT used by MCPService)
+- `alembic/versions/006_add_mcp_approvals.py` — migration chaining from 005_add_repository_tables (Wave 4 deliverable; down_revision = "005_add_repository_tables")
+- `src/devflow_api/repositories/approval_request.py` — ApprovalRequestRepository (workflow step approvals only; NOT used by MCPService; kept separate from MCPApprovalRepository)
 - `src/devflow_api/adapters/exceptions.py` — extended with `MCPApprovalRequiredError`, `MCPApprovalExpiredError`, `ConsumedError`
 - `requirements/base.txt` — add `mcp>=1.0,<2.0` (after checking `pyproject.toml` for an existing `mcp` declaration; use the existing version if present)
 - `requirements/requirements.lock` (or equivalent) — generated lockfile committed
+
+**Migration 006 required content (Wave 4 deliverable):**
+```python
+# 006_add_mcp_approvals.py
+revision = "006_add_mcp_approvals"
+down_revision = "005_add_repository_tables"
+branch_labels = None
+depends_on = None
+
+def upgrade() -> None:
+    op.create_table(
+        "mcp_approvals",
+        sa.Column("id", sa.Text(), nullable=False),
+        sa.Column("mcp_server_id", sa.Text(), nullable=False),
+        sa.Column("tool_name", sa.Text(), nullable=False),
+        sa.Column("arguments_hash", sa.Text(), nullable=False),
+        sa.Column("actor_id", sa.Text(), nullable=False),
+        sa.Column("workflow_run_id", sa.Integer(),
+                  sa.ForeignKey("workflow_runs.id", ondelete="SET NULL"), nullable=True),
+        sa.Column("status", sa.Text(), server_default="PENDING", nullable=False),
+        sa.Column("requested_at", sa.DateTime(), nullable=False),
+        sa.Column("resolved_at", sa.DateTime(), nullable=True),
+        sa.Column("expires_at", sa.DateTime(), nullable=False),
+        sa.Column("consumed_at", sa.DateTime(), nullable=True),
+        sa.CheckConstraint(
+            "status IN ('PENDING','APPROVED','REJECTED','EXPIRED','CONSUMED')",
+            name="ck_mcp_approvals_status"
+        ),
+        sa.PrimaryKeyConstraint("id"),
+    )
+    op.create_index("idx_mcp_approvals_server", "mcp_approvals", ["mcp_server_id"])
+    op.create_index("idx_mcp_approvals_status", "mcp_approvals", ["status"])
+    op.create_index("idx_mcp_approvals_expires", "mcp_approvals", ["expires_at"])
+
+def downgrade() -> None:
+    op.drop_index("idx_mcp_approvals_expires", table_name="mcp_approvals")
+    op.drop_index("idx_mcp_approvals_status", table_name="mcp_approvals")
+    op.drop_index("idx_mcp_approvals_server", table_name="mcp_approvals")
+    op.drop_table("mcp_approvals")
+```
 
 **Key implementation notes:**
 - Use `mcp` Python SDK's `stdio_client` and `ClientSession`.
@@ -847,6 +889,7 @@ Implement `src/devflow_api/adapters/mcp_client.py` with `MCPServerConfig`, `MCPC
 15. `mypy --strict src/devflow_api/adapters/mcp_client.py src/devflow_api/adapters/live/mcp_live.py src/devflow_api/services/mcp_service.py src/devflow_api/repositories/mcp_approval.py src/devflow_api/models/mcp_approval.py` exits with code 0.
 15. All MCP unit tests mock MCP subprocess; no real process is spawned.
 16. `requirements/base.txt` contains `mcp>=1.0,<2.0` (or the actual constraint if `pyproject.toml` already declares a different `mcp` version).
+17. `alembic upgrade head` from `005_add_repository_tables` applies migration `006_add_mcp_approvals` without error. Migration 006 file has `revision = "006_add_mcp_approvals"` and `down_revision = "005_add_repository_tables"` exactly. Wave 4 is independently applicable without any Wave 5 migration existing.
 
 **Named tests (all 8 MUST be present in `tests/unit/test_mcp_service.py`):**
 - `test_forged_approval_record_rejected` — verifies a caller cannot bypass the gate by constructing an in-memory approval object; `MCPService.invoke_tool` only accepts `mcp_approval_id` and retrieves `MCPApproval` from `MCPApprovalRepository`
@@ -1006,32 +1049,29 @@ Replace `9_Integrations.py` placeholder with live integration status. Extend `10
 
 ---
 
-### Task G1 — Repository model, RepositoryConfigRepository, GitHubConfirmation model, migration 006, MCPApproval model, MCPApprovalRepository, and migration 007
+### Task G1 — Repository model, RepositoryConfigRepository, GitHubConfirmation model, and migration 007
 
 **Wave:** 5
-**Requirements:** REQ-G1.1, REQ-G1.4, REQ-DB1.1, REQ-M2.1, REQ-M2.2, REQ-M2.3
-**Depends on:** Wave 4 merged (and implicitly W2 — migration 005 creates the repository_configs table)
+**Requirements:** REQ-G1.1, REQ-G1.4, REQ-DB1.1
+**Depends on:** Wave 4 merged (and implicitly W2 — migration 005 creates repository_configs; migration 006 creates mcp_approvals — both required for alembic chain to 007)
 **Estimated size:** Medium (3–4 hours)
 
 **Description:**
-Implement `src/devflow_api/models/repository.py` with `RepositoryConfig`. The `repository_configs` table was created by migration `005_add_repository_tables.py` in Wave 2 (Task W2). Implement `src/devflow_api/models/github_confirmation.py` with the SQLAlchemy `GitHubConfirmation` model (F2 correction — SQLite-backed, not in-memory). Author migration `006_add_github_confirmations.py` chaining from migration `005`. Implement `src/devflow_api/models/mcp_approval.py` with `MCPApproval` model (F6 correction). Implement `src/devflow_api/repositories/mcp_approval.py` with `MCPApprovalRepository`. Author migration `007_add_mcp_approvals.py` chaining from migration `006`. Wave 5 completion requires both migrations 006 and 007 applied.
+Implement `src/devflow_api/models/repository.py` with `RepositoryConfig`. The `repository_configs` table was created by migration `005_add_repository_tables.py` in Wave 2 (Task W2). Implement `src/devflow_api/models/github_confirmation.py` with the SQLAlchemy `GitHubConfirmation` model (F2 correction — SQLite-backed, not in-memory). Implement `src/devflow_api/repositories/github_confirmation.py` with `GitHubConfirmationRepository`. Author migration `007_add_github_confirmations.py` chaining from migration `006_add_mcp_approvals` (Wave 4 deliverable). Wave 5 completion requires migration 007 applied and GitHub confirmation tests passing.
 
-**Wave 5 migration reassignment note (F6):** Migration 007 is a new Wave 5 deliverable. Wave 5 previously encompassed only migration 006. Wave 5 now delivers two migrations: 006 (github_confirmations) and 007 (mcp_approvals). Both are authored in Task G1 (extended). This extends Wave 5 beyond its prior scope but does not change the wave ownership of any earlier migration.
+**Note (migration alignment):** The `MCPApproval` model, `MCPApprovalRepository`, and migration `006_add_mcp_approvals` are Wave 4 deliverables (Task I4). Task G1 does NOT author migration 006 or the MCPApproval model/repository — those are already delivered in Wave 4 before Wave 5 begins.
 
 **Deliverables:**
 - `src/devflow_api/models/repository.py`
 - `src/devflow_api/repositories/repository_config.py`
-- `src/devflow_api/models/github_confirmation.py` — `GitHubConfirmation` SQLAlchemy model (see design.md §3.7a and §8.2)
+- `src/devflow_api/models/github_confirmation.py` — `GitHubConfirmation` SQLAlchemy model (see design.md §3.7b and §8.2)
 - `src/devflow_api/repositories/github_confirmation.py` — `GitHubConfirmationRepository` with `get_by_id`, `create`, `consume_atomic`
-- `alembic/versions/006_add_github_confirmations.py` — migration chaining from 005
-- `src/devflow_api/models/mcp_approval.py` — `MCPApproval` SQLAlchemy model (see design.md §3.7b)
-- `src/devflow_api/repositories/mcp_approval.py` — `MCPApprovalRepository` with `create`, `get_by_id`, `consume_atomic`, `list_pending`
-- `alembic/versions/007_add_mcp_approvals.py` — migration chaining from 006
+- `alembic/versions/007_add_github_confirmations.py` — migration chaining from 006_add_mcp_approvals
 
-**Migration 006 required content:**
+**Migration 007 required content:**
 ```python
-revision = "006_add_github_confirmations"
-down_revision = "005_add_repository_tables"
+revision = "007_add_github_confirmations"
+down_revision = "006_add_mcp_approvals"
 branch_labels = None
 depends_on = None
 
@@ -1059,7 +1099,7 @@ def downgrade() -> None:
     op.drop_table("github_confirmations")
 ```
 
-**Dependency note:** This task depends on Wave 2 having been merged (which includes migration 005 creating the repository_configs table). The dependency `"Wave 4 merged"` implies Wave 2 was already merged; migration 005 must exist. Migration 006 chains from 005. Migration 007 chains from 006. Both must be applied for `GitHubConfirmationRepository` and `MCPApprovalRepository` to function.
+**Dependency note:** This task depends on Wave 4 having been merged (which includes migration 006 creating the mcp_approvals table). Migration 007 chains from 006. `alembic upgrade head` at Wave 5 completion reaches `"007_add_github_confirmations"`.
 
 **Acceptance Criteria:**
 1. `RepositoryConfig` model importable with correct FK and unique constraint.
@@ -1068,15 +1108,10 @@ def downgrade() -> None:
 4. Creating a duplicate `(project_id, owner, repo)` raises a SQLAlchemy `IntegrityError`.
 5. `GitHubConfirmation` model importable from `devflow_api.models.github_confirmation`.
 6. `GitHubConfirmationRepository.consume_atomic` atomically sets `used_at` and returns the updated record; raises `ConfirmationAlreadyUsedError` if already used.
-7. `alembic upgrade head` from `005_add_repository_tables` applies migrations 006 and 007 in order without error.
-8. `alembic downgrade -1` from `007` removes `mcp_approvals` table without error.
-9. `alembic downgrade -1` from `006` removes `github_confirmations` table without error.
-10. Migration 006 file has `revision = "006_add_github_confirmations"` and `down_revision = "005_add_repository_tables"` exactly.
-11. Migration 007 file has `revision = "007_add_mcp_approvals"` and `down_revision = "006_add_github_confirmations"` exactly.
-12. `MCPApproval` model importable from `devflow_api.models.mcp_approval`.
-13. `MCPApprovalRepository.consume_atomic` atomically sets `status = CONSUMED` and `consumed_at`; raises `ConsumedError` if 0 rows updated.
-14. Two concurrent `MCPApprovalRepository.consume_atomic` calls with the same id result in exactly one success and one `ConsumedError`.
-15. `mypy --strict src/devflow_api/models/repository.py src/devflow_api/models/github_confirmation.py src/devflow_api/repositories/repository_config.py src/devflow_api/repositories/github_confirmation.py src/devflow_api/models/mcp_approval.py src/devflow_api/repositories/mcp_approval.py` exits with code 0.
+7. `alembic upgrade head` from `006_add_mcp_approvals` applies migration 007 without error.
+8. `alembic downgrade -1` from `007` removes `github_confirmations` table without error.
+9. Migration 007 file has `revision = "007_add_github_confirmations"` and `down_revision = "006_add_mcp_approvals"` exactly.
+10. `mypy --strict src/devflow_api/models/repository.py src/devflow_api/models/github_confirmation.py src/devflow_api/repositories/repository_config.py src/devflow_api/repositories/github_confirmation.py` exits with code 0.
 
 **Definition of Done:** Files committed; all criteria verified in G5 tests.
 
@@ -1095,8 +1130,6 @@ Extend `GitHubAdapter` with branch, PR, and CI endpoints. Implement `RepositoryS
 **Deliverables:**
 - `src/devflow_api/adapters/live/github.py` — extended with branch/PR/CI methods
 - `src/devflow_api/services/repository.py` — `RepositoryService` with `issue_confirmation` + `create_branch` + `create_pull_request`
-- `src/devflow_api/repositories/github_confirmation.py` — `GitHubConfirmationRepository`
-- `src/devflow_api/models/github_confirmation.py` — `GitHubConfirmation` model (or Pydantic model for in-memory use)
 - `src/devflow_core/exceptions.py` — extended with `ConfirmationExpiredError`, `ConfirmationMismatchError`, `ConfirmationAlreadyUsedError`, `ConfirmationNotFoundError`
 
 **Key implementation notes:**
@@ -1198,7 +1231,7 @@ Write all Wave 5 tests and run full CI verification to confirm Phase 1 completio
 - `tests/unit/test_repository_service.py`
 - `tests/unit/test_repositories_router.py`
 - `tests/smoke/test_ui_pages.py` — final Settings page test
-- `tests/integration/test_database.py` — complete migration round-trip (all 5 migrations: 001→002→003→004→005)
+- `tests/integration/test_database.py` — complete migration round-trip (all 7 migrations: 001→002→003→004→005→006→007)
 - Updated `docs/openapi.json` — regenerated with `make docs` or `python scripts/export_openapi.py`
 
 **Required test cases:**
@@ -1233,7 +1266,7 @@ ruff check .
 4. `ruff check .` exits with code 0.
 5. `docs/openapi.json` contains no path with the word `merge`.
 6. All Phase 0 tests continue to pass.
-7. `alembic upgrade head` from Phase 0 schema reaches `"007_add_mcp_approvals"` without error (migration chain: 001→002→003→004→005→006→007). (F6 correction)
+7. `alembic upgrade head` from Phase 0 schema reaches `"007_add_github_confirmations"` without error (migration chain: 001→002→003→004→005→006→007). (migration alignment)
 8. All six GitHubConfirmation named tests pass: `test_github_confirmation_persisted_to_db`, `test_confirmation_expires_after_ttl`, `test_replay_rejected_after_use`, `test_parameter_mismatch_rejected`, `test_concurrent_consumption_safe`, `test_recovery_after_github_api_failure`. (F2 correction)
 9. `test_github_confirmation_not_restored_after_api_failure` passes (F9 correction).
 10. `test_mcp_approval_consume_atomic_safe` passes (F6 correction).

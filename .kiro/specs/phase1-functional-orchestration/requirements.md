@@ -14,6 +14,7 @@
 - v1.2.0 — Five amendment-round findings applied (see docs/reviews/phase1-specification-review.md §13)
 - v1.3.0 — Final specification correction: F1–F5 applied (FK test split, GitHubConfirmation persistence, MCP authorization consistency, superseded guidance labelled, metadata corrected)
 - v1.4.0 — 2026-11-15 — Corrections F1 (MCP approval authorization via approval_request_id), F2 (FK cascade test corrections), F3 (metadata), F6 (MCPApproval dedicated schema), F7 (outdated MCP authorization references), F8 (Wave 1 FK tests), F9 (approval consumption and external failure handling). Branch: feature/phase1-specification-planning, Base: aaaaacb703124fc31b0e757b2bf1739c4fb225c9.
+- v1.5.0 — Migration and dependency alignment: 006=mcp_approvals (Wave 4), 007=github_confirmations (Wave 5); REQ-G1.4 migration reference updated; REQ-M2.x wave ownership aligned to Wave 4. Branch: feature/phase1-specification-planning.
 
 ---
 
@@ -597,7 +598,7 @@ THEN `POST /api/v1/repositories/{repo_config_id}/branches` MUST support creating
 
 **GitHubConfirmation record structure:** `id` (UUID), `repo_full_name` (str), `operation` (Literal `"branch_create"` | `"pr_create"`), `parameters_hash` (SHA-256 of canonicalised operation parameters), `actor_id` (str), `workflow_run_id` (int | None), `issued_at` (datetime), `expires_at` (datetime — default TTL 10 minutes), `used_at` (datetime | None — set on first use).
 
-**Persistence requirement (F2 correction):** `GitHubConfirmation` MUST be persisted to SQLite via a `GitHubConfirmation` SQLAlchemy model and `GitHubConfirmationRepository`. In-memory storage is NOT acceptable — confirmation records must survive service restarts. A new Alembic migration `006_add_github_confirmations.py` MUST be authored in Wave 5 (Task G1), chaining from migration `005_add_repository_tables`. The migration chain becomes: 001 → 002 → 003 → 004 → 005 → 006.
+**Persistence requirement (F2 correction):** `GitHubConfirmation` MUST be persisted to SQLite via a `GitHubConfirmation` SQLAlchemy model and `GitHubConfirmationRepository`. In-memory storage is NOT acceptable — confirmation records must survive service restarts. A new Alembic migration `007_add_github_confirmations.py` MUST be authored in Wave 5 (Task G1), chaining from migration `006_add_mcp_approvals`. The migration chain becomes: 001 → 002 → 003 → 004 → 005 → 006 → 007.
 
 **Issuing a confirmation:** A `POST /api/v1/github-confirmations` endpoint issues a `GitHubConfirmation` record. The client then submits that `confirmation_id` in the branch or PR creation request. The simple `confirmed: bool` field is replaced by `confirmation_id: str`; a boolean flag alone is not accepted.
 
@@ -724,10 +725,10 @@ THEN dedicated Alembic migrations MUST be authored for each new table group intr
 | `003_add_workflow_tables.py` | `"003_add_workflow_tables"` | `"002_add_project_tags_column"` | workflows, workflow_runs | Wave 2 |
 | `004_add_approval_audit_tables.py` | `"004_add_approval_audit_tables"` | `"003_add_workflow_tables"` | approval_requests, workflow_audit_log | Wave 2 |
 | `005_add_repository_tables.py` | `"005_add_repository_tables"` | `"004_add_approval_audit_tables"` | repository_configs | Wave 2 |
-| `006_add_github_confirmations.py` | `"006_add_github_confirmations"` | `"005_add_repository_tables"` | github_confirmations | Wave 5 |
-| `007_add_mcp_approvals.py` | `"007_add_mcp_approvals"` | `"006_add_github_confirmations"` | mcp_approvals | Wave 5 |
+| `006_add_mcp_approvals.py` | `"006_add_mcp_approvals"` | `"005_add_repository_tables"` | mcp_approvals | Wave 4 |
+| `007_add_github_confirmations.py` | `"007_add_github_confirmations"` | `"006_add_mcp_approvals"` | github_confirmations | Wave 5 |
 
-**Revision chain:** `001_create_initial_tables` → `002_add_project_tags_column` → `003_add_workflow_tables` → `004_add_approval_audit_tables` → `005_add_repository_tables` → `006_add_github_confirmations` → `007_add_mcp_approvals`
+**Revision chain:** `001_create_initial_tables` → `002_add_project_tags_column` → `003_add_workflow_tables` → `004_add_approval_audit_tables` → `005_add_repository_tables` → `006_add_mcp_approvals` → `007_add_github_confirmations`
 
 Each migration's `revision` string MUST exactly match the value in the table above. Each migration's `down_revision` string MUST exactly match the preceding revision's `revision` string.
 

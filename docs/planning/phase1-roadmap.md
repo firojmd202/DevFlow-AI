@@ -13,6 +13,7 @@
 - v1.2.0 — Five amendment-round findings applied
 - v1.3.0 — Final specification correction: F1–F5 and D1–D4 applied (FK test split, GitHubConfirmation persistence + migration 006, MCP authorization consistency, superseded guidance labelled, metadata corrected)
 - v1.4.0 — 2026-11-15 — Corrections F1 (MCP approval authorization via approval_request_id), F2 (FK cascade test corrections), F3 (metadata), F6 (MCPApproval dedicated schema + migration 007), F7 (outdated MCP authorization references), F8 (Wave 1 FK tests), F9 (approval consumption and external failure handling). Branch: feature/phase1-specification-planning, Base: aaaaacb703124fc31b0e757b2bf1739c4fb225c9.
+- v1.5.0 — Migration and dependency alignment: 006=mcp_approvals (Wave 4, Task I4), 007=github_confirmations (Wave 5, Task G1); down_revision chain updated; Wave 4 completion gate updated; Wave 5 task G1 and G5 updated. Branch: feature/phase1-specification-planning.
 
 ---
 
@@ -71,8 +72,8 @@ Phase 1 adds six migrations in this exact chain:
         └── 003_add_workflow_tables  (Wave 2 — Task W2)
               └── 004_add_approval_audit_tables  (Wave 2 — Task W2)
                     └── 005_add_repository_tables  (Wave 2 — Task W2)
-                          └── 006_add_github_confirmations  (Wave 5 — Task G1)
-                                └── 007_add_mcp_approvals  (Wave 5 — Task G1 extended)
+                          └── 006_add_mcp_approvals  (Wave 4 — Task I4)
+                                └── 007_add_github_confirmations  (Wave 5 — Task G1)
 ```
 
 | Revision ID | `down_revision` | File | Wave |
@@ -82,12 +83,14 @@ Phase 1 adds six migrations in this exact chain:
 | `"003_add_workflow_tables"` | `"002_add_project_tags_column"` | `003_add_workflow_tables.py` | Wave 2 |
 | `"004_add_approval_audit_tables"` | `"003_add_workflow_tables"` | `004_add_approval_audit_tables.py` | Wave 2 |
 | `"005_add_repository_tables"` | `"004_add_approval_audit_tables"` | `005_add_repository_tables.py` | Wave 2 |
-| `"006_add_github_confirmations"` | `"005_add_repository_tables"` | `006_add_github_confirmations.py` | Wave 5 |
-| `"007_add_mcp_approvals"` | `"006_add_github_confirmations"` | `007_add_mcp_approvals.py` | Wave 5 |
+| `"006_add_mcp_approvals"` | `"005_add_repository_tables"` | `006_add_mcp_approvals.py` | Wave 4 |
+| `"007_add_github_confirmations"` | `"006_add_mcp_approvals"` | `007_add_github_confirmations.py` | Wave 5 |
 
 **Wave 1 migration independence:** Migration 002 chains directly from `001_create_initial_tables` (the Phase 0 head). `alembic upgrade head` in Wave 1 applies only migration 002. Wave 2 migrations (003, 004, 005) extend the chain further.
 
-**Wave 5 migration reassignment (F6):** Wave 5 now delivers two migrations: 006 (`github_confirmations`) and 007 (`mcp_approvals`). Both are Task G1 deliverables. `alembic upgrade head` at Wave 5 completion reaches `007_add_mcp_approvals`.
+**Wave 4 migration (migration alignment):** Wave 4 delivers migration 006 (`mcp_approvals`). This migration chains from `005_add_repository_tables` (Wave 2). Wave 4 completion requires migration 006 applied and MCP approval tests passing. Wave 4 has no dependency on any Wave 5 deliverable.
+
+**Wave 5 migration:** Wave 5 delivers migration 007 (`github_confirmations`), chaining from `006_add_mcp_approvals` (Wave 4). `alembic upgrade head` at Wave 5 completion reaches `007_add_github_confirmations`.
 
 ---
 
@@ -156,12 +159,12 @@ Phase 1 adds six migrations in this exact chain:
 | I1 | Adapter exceptions | Small |
 | I2 | GitHubAdapter (live) | Medium |
 | I3 | OllamaAdapter + FigmaAdapter (live) | Medium |
-| I4 | MCPServerConfig + MCPClient + MCPLiveAdapter | Large |
+| I4 | MCPServerConfig + MCPClient + MCPLiveAdapter + MCPService + MCPApproval model/repository + migration 006 | Large |
 | I5 | Registry: get_live, register_live | Small |
 | I6 | Integrations router extension + Settings | Small |
 | I7 | Streamlit: Integrations + Settings + Tests | Large |
 
-**Wave 4 completion gate:** `pytest -v --cov=src --cov-branch --cov-fail-under=80 --cov-report=term-missing` exits with code 0; `registry.get_live("github")` returns live adapter when token is set, stub otherwise; MCP permission gate tested; secrets not in logs (test named `test_github_token_not_in_log_records`); subprocess env isolation tested (test named `test_mcp_subprocess_launched_with_explicit_env`); timeout test named.
+**Wave 4 completion gate:** `pytest -v --cov=src --cov-branch --cov-fail-under=80 --cov-report=term-missing` exits with code 0; `registry.get_live("github")` returns live adapter when token is set, stub otherwise; MCP permission gate tested; secrets not in logs (test named `test_github_token_not_in_log_records`); subprocess env isolation tested (test named `test_mcp_subprocess_launched_with_explicit_env`); timeout test named; migration 006 (`006_add_mcp_approvals`) applied; MCP approval gate tests passing (all 8 named tests in `test_mcp_service.py`). Wave 4 has no dependency on any Wave 5 deliverable.
 
 ---
 
@@ -172,7 +175,7 @@ Phase 1 adds six migrations in this exact chain:
 
 | Task | Description | Size |
 |---|---|---|
-| G1 | RepositoryConfig model + repository (table created in W2); GitHubConfirmation model + repo + migration 006; MCPApproval model + repo + migration 007 | Medium |
+| G1 | RepositoryConfig model + repository (table created in W2); GitHubConfirmation model + repo + migration 007 | Medium |
 | G2 | RepositoryService + GitHubAdapter extension | Large |
 | G3 | Repositories router | Medium |
 | G4 | Settings page: GitHub status | Small |
@@ -183,10 +186,10 @@ Phase 1 adds six migrations in this exact chain:
 - `mypy --strict src/` ✓
 - `ruff check .` ✓
 - `docs/openapi.json` regenerated, no `/merge` path
-- Migrations 006 and 007 applied (`alembic upgrade head` reaches `"007_add_mcp_approvals"`)
+- Migrations 006 and 007 applied (`alembic upgrade head` reaches `"007_add_github_confirmations"`)
 - All six GitHubConfirmation tests passing: `test_github_confirmation_persisted_to_db`, `test_confirmation_expires_after_ttl`, `test_replay_rejected_after_use`, `test_parameter_mismatch_rejected`, `test_concurrent_consumption_safe`, `test_recovery_after_github_api_failure`
 - `test_github_confirmation_not_restored_after_api_failure` passing (F9)
-- `test_mcp_approval_consume_atomic_safe` passing (F6)
+- `test_mcp_approval_consume_atomic_safe` passing (migration 006, Wave 4 — verified in Wave 5 full round-trip)
 - Full migration round-trip test passes for all 7 migrations (001→007)
 - All Phase 0 tests still pass
 

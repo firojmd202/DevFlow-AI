@@ -14,6 +14,7 @@
 - v1.2.0 — Five amendment-round findings applied
 - v1.3.0 — Final specification correction: F1–F5 and D1–D4 applied (FK test split, GitHubConfirmation persistence + migration 006, MCP authorization 8-step sequence, superseded guidance labelled, metadata corrected, D2 MCP binary trust statement, D4 audit event distinction)
 - v1.4.0 — 2026-11-15 — Corrections F1 (MCP approval authorization via approval_request_id), F2 (FK cascade test corrections), F3 (metadata), F6 (MCPApproval dedicated schema + migration 007), F7 (outdated MCP authorization references), F8 (Wave 1 FK tests), F9 (approval consumption and external failure handling). Branch: feature/phase1-specification-planning, Base: aaaaacb703124fc31b0e757b2bf1739c4fb225c9.
+- v1.5.0 — Migration and dependency alignment: 006↔007 swap (006=mcp_approvals Wave 4, 007=github_confirmations Wave 5); MCPApproval model/repository/migration moved to Wave 4 Task I4; down_revision chain updated (007 chains from 006_add_mcp_approvals); §13 file layout updated; traceability matrix updated. Branch: feature/phase1-specification-planning.
 
 ---
 
@@ -121,8 +122,8 @@ None (base)
               └── 003_add_workflow_tables   ← Wave 2 (Task W2)
                     └── 004_add_approval_audit_tables   ← Wave 2 (Task W2)
                           └── 005_add_repository_tables   ← Wave 2 (Task W2)
-                                └── 006_add_github_confirmations   ← Wave 5 (Task G1)
-                                      └── 007_add_mcp_approvals   ← Wave 5 (Task G1 extended)
+                                └── 006_add_mcp_approvals   ← Wave 4 (Task I4)
+                                      └── 007_add_github_confirmations   ← Wave 5 (Task G1)
 ```
 
 | Revision ID | `down_revision` | File | Wave | Tables / columns |
@@ -132,10 +133,10 @@ None (base)
 | `"003_add_workflow_tables"` | `"002_add_project_tags_column"` | `003_add_workflow_tables.py` | Wave 2 | workflows, workflow_runs |
 | `"004_add_approval_audit_tables"` | `"003_add_workflow_tables"` | `004_add_approval_audit_tables.py` | Wave 2 | approval_requests, workflow_audit_log |
 | `"005_add_repository_tables"` | `"004_add_approval_audit_tables"` | `005_add_repository_tables.py` | Wave 2 | repository_configs |
-| `"006_add_github_confirmations"` | `"005_add_repository_tables"` | `006_add_github_confirmations.py` | Wave 5 | github_confirmations |
-| `"007_add_mcp_approvals"` | `"006_add_github_confirmations"` | `007_add_mcp_approvals.py` | Wave 5 | mcp_approvals |
+| `"006_add_mcp_approvals"` | `"005_add_repository_tables"` | `006_add_mcp_approvals.py` | Wave 4 | mcp_approvals |
+| `"007_add_github_confirmations"` | `"006_add_mcp_approvals"` | `007_add_github_confirmations.py` | Wave 5 | github_confirmations |
 
-**Wave 5 migration note (F6):** Migration 007 is a Wave 5 deliverable alongside migration 006. Wave 5 (Task G1 extended) is responsible for both `github_confirmations` (migration 006) and `mcp_approvals` (migration 007). Wave 5 completion requires both migrations applied.
+**Wave 4 migration note:** Migration 006 (`006_add_mcp_approvals`) is a Wave 4 deliverable (Task I4). Wave 4 completion requires migration 006 applied and MCP approval tests passing. Wave 4 has no dependency on any Wave 5 deliverable.
 
 Each revision ID string in the table above is the exact string that MUST appear in the Python file as `revision = "..."`. The `down_revision` column is the exact string that MUST appear as `down_revision = "..."` in the next file.
 
@@ -245,9 +246,74 @@ CREATE TABLE repository_configs (
 
 ---
 
-### 3.7a github_confirmations (migration 006 — F2 correction)
+### 3.7a mcp_approvals (migration 006 — Wave 4)
 
-Migration `006_add_github_confirmations.py` is authored in Wave 5 (Task G1), chaining from `005_add_repository_tables`. The `GitHubConfirmation` SQLAlchemy model, `GitHubConfirmationRepository`, and this migration are all Wave 5 deliverables.
+Migration `006_add_mcp_approvals.py` is authored in Wave 4 (Task I4), chaining from `005_add_repository_tables`. The `MCPApproval` SQLAlchemy model, `MCPApprovalRepository`, and this migration are all Wave 4 deliverables. Wave 4 completion requires migration 006 applied and MCP approval tests passing. Wave 4 has no dependency on any Wave 5 deliverable.
+
+**Separation note:** The `approval_requests` table (integer PK, `ApprovalRequest` model) is used exclusively for workflow step approval gates. It is NOT used for MCP tool authorization. `MCPApproval` (UUID PK, `mcp_approvals` table) is the sole authorization record for MCP consequential tool invocations.
+
+```sql
+CREATE TABLE mcp_approvals (
+    id              TEXT     PRIMARY KEY,                 -- UUID as text
+    mcp_server_id   TEXT     NOT NULL,                   -- MCPServerConfig.name
+    tool_name       TEXT     NOT NULL,
+    arguments_hash  TEXT     NOT NULL,                   -- SHA-256 of canonical JSON
+    actor_id        TEXT     NOT NULL,
+    workflow_run_id INTEGER  REFERENCES workflow_runs(id) ON DELETE SET NULL,
+    status          TEXT     NOT NULL DEFAULT 'PENDING'
+                             CHECK (status IN ('PENDING','APPROVED','REJECTED','EXPIRED','CONSUMED')),
+    requested_at    DATETIME NOT NULL,
+    resolved_at     DATETIME,
+    expires_at      DATETIME NOT NULL,
+    consumed_at     DATETIME
+);
+CREATE INDEX idx_mcp_approvals_server ON mcp_approvals(mcp_server_id);
+CREATE INDEX idx_mcp_approvals_status ON mcp_approvals(status);
+CREATE INDEX idx_mcp_approvals_expires ON mcp_approvals(expires_at);
+```
+
+**Required revision header:**
+```python
+# 006_add_mcp_approvals.py
+revision = "006_add_mcp_approvals"
+down_revision = "005_add_repository_tables"
+```
+
+**MCPApproval SQLAlchemy model:**
+```python
+# src/devflow_api/models/mcp_approval.py
+class MCPApproval(Base):
+    __tablename__ = "mcp_approvals"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)          # UUID as text
+    mcp_server_id: Mapped[str] = mapped_column(Text, nullable=False)
+    tool_name: Mapped[str] = mapped_column(Text, nullable=False)
+    arguments_hash: Mapped[str] = mapped_column(Text, nullable=False) # SHA-256
+    actor_id: Mapped[str] = mapped_column(Text, nullable=False)
+    workflow_run_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("workflow_runs.id", ondelete="SET NULL"), nullable=True
+    )
+    status: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default="PENDING"
+    )
+    requested_at: Mapped[datetime] = mapped_column(UTCDateTime, nullable=False)
+    resolved_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
+    expires_at: Mapped[datetime] = mapped_column(UTCDateTime, nullable=False)
+    consumed_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
+```
+
+**MCPApproval valid status transitions:**
+- `PENDING` → `APPROVED` (human resolves as approved)
+- `PENDING` → `REJECTED` (human resolves as rejected)
+- `APPROVED` → `CONSUMED` (atomic consumption via `consume_atomic` before tool execution)
+- `PENDING` → `EXPIRED` (TTL elapsed before resolution)
+- `APPROVED` → `EXPIRED` (TTL elapsed before consumption)
+
+---
+
+### 3.7b github_confirmations (migration 007 — Wave 5)
+
+Migration `007_add_github_confirmations.py` is authored in Wave 5 (Task G1), chaining from `006_add_mcp_approvals`. The `GitHubConfirmation` SQLAlchemy model, `GitHubConfirmationRepository`, and this migration are all Wave 5 deliverables.
 
 ```sql
 CREATE TABLE github_confirmations (
@@ -268,9 +334,9 @@ CREATE INDEX idx_github_confirmations_actor   ON github_confirmations(actor_id);
 
 **Required revision header:**
 ```python
-# 006_add_github_confirmations.py
-revision = "006_add_github_confirmations"
-down_revision = "005_add_repository_tables"
+# 007_add_github_confirmations.py
+revision = "007_add_github_confirmations"
+down_revision = "006_add_mcp_approvals"
 ```
 
 **GitHubConfirmation SQLAlchemy model:**
@@ -323,69 +389,6 @@ class GitHubConfirmationRepository(BaseRepository[GitHubConfirmation]):
 1. Confirmation records survive service restarts — a confirmation issued before a restart can still be consumed after.
 2. Concurrent duplicate-consumption is prevented via atomic `UPDATE WHERE used_at IS NULL` (not possible with in-memory maps).
 3. Audit trail is complete — issued and used timestamps are durable.
-
-### 3.7b mcp_approvals (migration 007 — F6 correction)
-
-Migration `007_add_mcp_approvals.py` is authored in Wave 5 (Task G1 extended), chaining from `006_add_github_confirmations`. The `MCPApproval` SQLAlchemy model, `MCPApprovalRepository`, and this migration are all Wave 5 deliverables.
-
-**Separation note:** The `approval_requests` table (integer PK, `ApprovalRequest` model) is used exclusively for workflow step approval gates. It is NOT used for MCP tool authorization. `MCPApproval` (UUID PK, `mcp_approvals` table) is the sole authorization record for MCP consequential tool invocations.
-
-```sql
-CREATE TABLE mcp_approvals (
-    id              TEXT     PRIMARY KEY,                 -- UUID as text
-    mcp_server_id   TEXT     NOT NULL,                   -- MCPServerConfig.name
-    tool_name       TEXT     NOT NULL,
-    arguments_hash  TEXT     NOT NULL,                   -- SHA-256 of canonical JSON
-    actor_id        TEXT     NOT NULL,
-    workflow_run_id INTEGER  REFERENCES workflow_runs(id) ON DELETE SET NULL,
-    status          TEXT     NOT NULL DEFAULT 'PENDING'
-                             CHECK (status IN ('PENDING','APPROVED','REJECTED','EXPIRED','CONSUMED')),
-    requested_at    DATETIME NOT NULL,
-    resolved_at     DATETIME,
-    expires_at      DATETIME NOT NULL,
-    consumed_at     DATETIME
-);
-CREATE INDEX idx_mcp_approvals_server ON mcp_approvals(mcp_server_id);
-CREATE INDEX idx_mcp_approvals_status ON mcp_approvals(status);
-CREATE INDEX idx_mcp_approvals_expires ON mcp_approvals(expires_at);
-```
-
-**Required revision header:**
-```python
-# 007_add_mcp_approvals.py
-revision = "007_add_mcp_approvals"
-down_revision = "006_add_github_confirmations"
-```
-
-**MCPApproval SQLAlchemy model:**
-```python
-# src/devflow_api/models/mcp_approval.py
-class MCPApproval(Base):
-    __tablename__ = "mcp_approvals"
-
-    id: Mapped[str] = mapped_column(Text, primary_key=True)          # UUID as text
-    mcp_server_id: Mapped[str] = mapped_column(Text, nullable=False)
-    tool_name: Mapped[str] = mapped_column(Text, nullable=False)
-    arguments_hash: Mapped[str] = mapped_column(Text, nullable=False) # SHA-256
-    actor_id: Mapped[str] = mapped_column(Text, nullable=False)
-    workflow_run_id: Mapped[int | None] = mapped_column(
-        Integer, ForeignKey("workflow_runs.id", ondelete="SET NULL"), nullable=True
-    )
-    status: Mapped[str] = mapped_column(
-        Text, nullable=False, server_default="PENDING"
-    )
-    requested_at: Mapped[datetime] = mapped_column(UTCDateTime, nullable=False)
-    resolved_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
-    expires_at: Mapped[datetime] = mapped_column(UTCDateTime, nullable=False)
-    consumed_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
-```
-
-**MCPApproval valid status transitions:**
-- `PENDING` → `APPROVED` (human resolves as approved)
-- `PENDING` → `REJECTED` (human resolves as rejected)
-- `APPROVED` → `CONSUMED` (atomic consumption via `consume_atomic` before tool execution)
-- `PENDING` → `EXPIRED` (TTL elapsed before resolution)
-- `APPROVED` → `EXPIRED` (TTL elapsed before consumption)
 
 ---
 
@@ -822,7 +825,7 @@ class MCPService:
 #   consumed_at     — DATETIME | None (UTCDateTime; set atomically on first successful consumption)
 ```
 
-**MCPApprovalRepository (§3.7b above — full interface):**
+**MCPApprovalRepository (§3.7a above — full interface):**
 ```python
 # src/devflow_api/repositories/mcp_approval.py
 class MCPApprovalRepository(BaseRepository[MCPApproval]):
@@ -851,7 +854,7 @@ class MCPApprovalRepository(BaseRepository[MCPApproval]):
 | `mcp_tool_completed` | After `MCPClient.call_tool` returns without exception | Distinct from `mcp_tool_invoked` |
 | `mcp_tool_failed` | After `MCPClient.call_tool` raises any exception or times out | — |
 
-**New files:** `MCPApprovalRepository` lives at `src/devflow_api/repositories/mcp_approval.py`. `MCPApproval` model lives at `src/devflow_api/models/mcp_approval.py`. Both added to new-file layout in §13 and to Wave 5, Task G1 extended deliverables.
+**New files:** `MCPApprovalRepository` lives at `src/devflow_api/repositories/mcp_approval.py`. `MCPApproval` model lives at `src/devflow_api/models/mcp_approval.py`. Both added to new-file layout in §13 and to Wave 4, Task I4 deliverables. Migration 006 (`006_add_mcp_approvals`) is a Wave 4 deliverable. No Wave 5 deliverable is required by Wave 4.
 
 ---
 
@@ -995,7 +998,7 @@ class RepositoryService:
 
 **GitHubConfirmation record (F2 correction — SQLAlchemy ORM model, persisted to SQLite):**
 ```python
-# src/devflow_api/models/github_confirmation.py  (SQLAlchemy model — see §3.7a for full definition)
+# src/devflow_api/models/github_confirmation.py  (SQLAlchemy model — see §3.7b for full definition)
 class GitHubConfirmation(Base):
     __tablename__ = "github_confirmations"
     id: Mapped[str]                       # UUID as text, primary key
@@ -1009,7 +1012,7 @@ class GitHubConfirmation(Base):
     used_at: Mapped[datetime | None]      # None until first use; set atomically
 ```
 
-**SUPERSEDED — see §3.7a:** The earlier design stub defined `GitHubConfirmation` as a Pydantic `BaseModel` for in-memory use. This is superseded by the SQLAlchemy model above with migration 006. In-memory storage is NOT acceptable (F2 correction). The persistence requirement ensures restart recovery and concurrent duplicate-consumption prevention.
+**SUPERSEDED — see §3.7b:** The earlier design stub defined `GitHubConfirmation` as a Pydantic `BaseModel` for in-memory use. This is superseded by the SQLAlchemy model above with migration 007. In-memory storage is NOT acceptable (F2 correction). The persistence requirement ensures restart recovery and concurrent duplicate-consumption prevention.
 
 **Confirmation endpoint:** `POST /api/v1/github-confirmations` → issues a `GitHubConfirmation`, returns `{"id": "...", "expires_at": "..."}`. The client then includes `{"confirmation_id": "<id>", ...}` in the branch/PR creation request body.
 
@@ -1328,7 +1331,7 @@ src/devflow_api/
         workflow.py          (new — WorkflowService)
         approval.py          (new — ApprovalService)
         repository.py        (new — RepositoryService; owns GitHubConfirmation gate)
-        mcp_service.py       (new — MCPService; owns MCP approval gate; depends on ApprovalRequestRepository)
+        mcp_service.py       (new — MCPService; owns MCP approval gate; depends on MCPApprovalRepository; NOT ApprovalRequestRepository)
 
     routers/
         projects.py          (replace stub with live DB calls)
@@ -1359,8 +1362,8 @@ alembic/versions/
     003_add_workflow_tables.py        (new — Wave 2, Task W2)
     004_add_approval_audit_tables.py  (new — Wave 2, Task W2)
     005_add_repository_tables.py      (new — Wave 2, Task W2)
-    006_add_github_confirmations.py   (new — Wave 5, Task G1)
-    007_add_mcp_approvals.py          (new — Wave 5, Task G1 extended)
+    006_add_mcp_approvals.py          (new — Wave 4, Task I4)
+    007_add_github_confirmations.py   (new — Wave 5, Task G1)
 
 src/devflow_ui/
     api_client.py            (extended — all Phase 1 methods)
@@ -1657,8 +1660,8 @@ MCP_SERVERS_CONFIG: str = ""   # Already present in Phase 0; validator added in 
 | REQ-M1.6 | MCPLiveAdapter / MCPStubAdapter fallback | §6, §7.2 | I4, I5, I7 |
 | REQ-M1.7 | MCP tool classification + approval gate + 9-step sequence + 8 audit events | §7.5 | I4, I7 |
 | REQ-M1.8 | MCP SDK version constraint + lockfile + offline tests | §7.6 | I4 |
-| REQ-M2.1 | MCPApproval model (UUID PK, mcp_approvals table) | §3.7b | G1, I4, I7 |
-| REQ-M2.2 | MCPApprovalRepository (create, get_by_id, consume_atomic, list_pending) | §3.7b, §7.5 | G1, I4, I7 |
+| REQ-M2.1 | MCPApproval model (UUID PK, mcp_approvals table) | §3.7a | I4, I7 |
+| REQ-M2.2 | MCPApprovalRepository (create, get_by_id, consume_atomic, list_pending) | §3.7a, §7.5 | I4, I7 |
 | REQ-M2.3 | MCPService injected with MCPApprovalRepository (not ApprovalRequestRepository) | §7.5 | I4, I7 |
 | REQ-M2.4 | Failure semantics: no auto-restore; indeterminate treated as failure; new approval for retry | §7.5b | I4, I7 |
 | REQ-G1.1 | RepositoryConfig model (Wave 5); table created Wave 2 | §3.6, §4.4, §10.4 | G1, G3, G5 |
@@ -1672,7 +1675,7 @@ MCP_SERVERS_CONFIG: str = ""   # Already present in Phase 0; validator added in 
 | REQ-U1.3 | History page | §12.1 | A4, A5 |
 | REQ-U1.4 | APIClient extension for all Phase 1 endpoints | §12.2 | P5, A4, I7, G4 |
 | REQ-U1.5 | Settings page Phase 1 config summary | §12.1 | I6, I7, G4, G5 |
-| REQ-DB1.1 | 5 migrations: 002–006, exact revision IDs + chain | §3.0 | P1, W2, G1, G5 |
+| REQ-DB1.1 | 7 migrations: 001–007, exact revision IDs + chain, Wave assignments | §3.0 | P1, W2, I4, G1, G5 |
 | REQ-DB1.2 | Migration 002 adds tags_json, applies from Phase 0 head | §3.1 | P1, P6 |
 | REQ-DB1.3 | PRAGMA foreign_keys=ON on every connection; correct CASCADE/SET NULL directions; Wave 1 tests use Wave 1 tables only | §3.7 | P1, P6 (Wave 1 tests), W6 (Wave 2 tests) |
 | REQ-S1.1 | GitHubConfirmation gates; credential ≠ authorization | §14.1, §14.2 | A3, G2, G3, G5, W5, W6 |
