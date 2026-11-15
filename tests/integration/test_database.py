@@ -28,15 +28,49 @@ def test_alembic_upgrade_downgrade_roundtrip(
     assert not tables(sqlite_path)
     command.upgrade(configuration, "head")
     assert TABLES <= tables(sqlite_path)
-    command.downgrade(configuration, "-1")
+    command.downgrade(configuration, "base")
     assert not TABLES & tables(sqlite_path)
     command.upgrade(configuration, "head")
     assert TABLES <= tables(sqlite_path)
     command.check(configuration)
     with closing(sqlite3.connect(sqlite_path)) as connection:
         assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == (
-            "001_create_initial_tables",
+            "002_add_project_tags_column",
         )
         assert connection.execute("PRAGMA journal_mode").fetchone() == ("wal",)
     sqlite_path.unlink()
     assert not sqlite_path.exists()
+
+
+@pytest.mark.integration
+def test_migration_002_round_trip(sqlite_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DATABASE_URL", f"sqlite+aiosqlite:///{sqlite_path.as_posix()}")
+    get_settings.cache_clear()
+    config = Config(str(ROOT / "alembic.ini"))
+    command.upgrade(config, "001_create_initial_tables")
+    with closing(sqlite3.connect(sqlite_path)) as connection, connection:
+        connection.execute(
+            "INSERT INTO projects (name, created_at, updated_at) "
+            "VALUES ('Legacy', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+        )
+    command.upgrade(config, "002_add_project_tags_column")
+    with closing(sqlite3.connect(sqlite_path)) as connection:
+        assert connection.execute("SELECT tags_json FROM projects").fetchone() == ("[]",)
+    command.downgrade(config, "-1")
+    with closing(sqlite3.connect(sqlite_path)) as connection:
+        columns = {column[1] for column in connection.execute("PRAGMA table_info(projects)")}
+        assert "tags_json" not in columns
+        assert columns
+
+
+@pytest.mark.integration
+def test_migration_002_upgrade_downgrade(
+    sqlite_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("DATABASE_URL", f"sqlite+aiosqlite:///{sqlite_path.as_posix()}")
+    get_settings.cache_clear()
+    config = Config(str(ROOT / "alembic.ini"))
+    command.upgrade(config, "002_add_project_tags_column")
+    assert TABLES <= tables(sqlite_path)
+    command.downgrade(config, "base")
+    assert not TABLES & tables(sqlite_path)

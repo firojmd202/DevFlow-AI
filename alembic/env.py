@@ -33,6 +33,7 @@ def run_migrations_online() -> None:
         try:
             cursor.execute("PRAGMA journal_mode=WAL")
             cursor.fetchone()
+            cursor.execute("PRAGMA foreign_keys=ON")
         finally:
             cursor.close()
 
