@@ -1,7 +1,7 @@
 # DevFlow AI — Phase 1: Functional Orchestration Design
 
-**Version:** 1.4.0
-**Status:** Corrected — Awaiting Final Independent Review
+**Version:** 1.5.3
+**Status:** Corrected — Final PR Readiness Reviewed
 **Scope:** Phase 1 — Functional Orchestration
 **Branch:** feature/phase1-specification-planning
 **Base commit:** aaaaacb703124fc31b0e757b2bf1739c4fb225c9
@@ -15,6 +15,9 @@
 - v1.3.0 — Final specification correction: F1–F5 and D1–D4 applied (FK test split, GitHubConfirmation persistence + migration 006, MCP authorization 8-step sequence, superseded guidance labelled, metadata corrected, D2 MCP binary trust statement, D4 audit event distinction)
 - v1.4.0 — 2026-11-15 — Corrections F1 (MCP approval authorization via approval_request_id), F2 (FK cascade test corrections), F3 (metadata), F6 (MCPApproval dedicated schema + migration 007), F7 (outdated MCP authorization references), F8 (Wave 1 FK tests), F9 (approval consumption and external failure handling). Branch: feature/phase1-specification-planning, Base: aaaaacb703124fc31b0e757b2bf1739c4fb225c9.
 - v1.5.0 — Migration and dependency alignment: 006↔007 swap (006=mcp_approvals Wave 4, 007=github_confirmations Wave 5); MCPApproval model/repository/migration moved to Wave 4 Task I4; down_revision chain updated (007 chains from 006_add_mcp_approvals); §13 file layout updated; traceability matrix updated. Branch: feature/phase1-specification-planning.
+- v1.5.1 — MCP Security Hardening Pass (S1–S2): S1 workflow_run_id binding rules added to §7.5 (invoke_tool signature, 6 binding rules, trusted_workflow_run_id server-side parameter); S2 atomic consumption contract strengthened in §7.5 and MCPApprovalRepository (8-step transaction sequence, SQLite concurrency assumptions, datetime.now(UTC) enforcement); mcp_approval_rejected audit event with reason field added to §7.5 and §16; 9 new named negative tests added to §7.5. Branch: feature/phase1-specification-planning.
+- v1.5.2 — 2026-11-15 — Type and Concurrency Alignment Pass (T1–T2): T1 trusted_workflow_run_id type corrected UUID → int | None throughout §7.5 (invoke_tool signature, consume_atomic signature, MCPApproval model notes); T2 SQLite concurrency model clarified: removed incorrect "SQLAlchemy connection pooling serializes writes" claim; added BEGIN IMMEDIATE transaction semantics, busy_timeout policy, and retry rules to §7.5 consume_atomic; 5 new T2 named negative tests added. Branch: feature/phase1-specification-planning.
+- v1.5.3 — 2026-11-15 — Final PR Readiness Gate (C1–C2): C1 redundant workflow_run_id parameter removed from invoke_tool; only trusted_workflow_run_id: int | None remains; added explicit §7.5 statement that trusted_workflow_run_id is resolved from server-side session context and never from tool arguments or client-supplied fields. C2 consume_atomic signature extended with all binding fields (actor_id, mcp_server_id, tool_name, arguments_hash) as explicit parameters; in-transaction verification of all bindings documented with 8-step algorithm; test_approval_modified_between_validation_and_consumption added to Wave 4 I4 and I7. Branch: feature/phase1-specification-planning.
 
 ---
 
@@ -745,6 +748,8 @@ class MCPApprovalExpiredError(DevFlowError):
 
 **No-bypass rule:** No adapter, router, or Streamlit handler may import or instantiate `MCPClient` directly. All MCP invocations MUST go through `MCPService.invoke_tool`. This rule is enforced by architecture convention and verified by `test_no_direct_mcp_client_bypass`.
 
+**C1 — Trusted workflow context (single parameter, server-side only):** `MCPService.invoke_tool` has exactly ONE workflow context parameter: `trusted_workflow_run_id: int | None`. The former `workflow_run_id` parameter has been removed. `trusted_workflow_run_id` is resolved by the application layer from the current execution session before calling `invoke_tool`. It is never read from tool arguments, request body, or any client-supplied field. Callers cannot select or override this value.
+
 **Separation of approval systems:** The workflow `approval_requests` table (integer PK) is not used for MCP authorization. `MCPApproval` (UUID PK, `mcp_approvals` table) is the sole authorization record for MCP consequential tool invocations. `MCPService` MUST use `MCPApprovalRepository` and MUST NOT use `ApprovalRequestRepository`.
 
 ```python
@@ -764,8 +769,8 @@ class MCPService:
         tool_name: str,
         arguments: dict[str, object],
         actor_id: str,
-        workflow_run_id: int | None = None,
-        mcp_approval_id: UUID | None = None,         # F6: UUID, NOT str approval_request_id
+        mcp_approval_id: UUID | None = None,          # F6: UUID, NOT str approval_request_id
+        trusted_workflow_run_id: int | None = None,   # C1/T1/S1: int | None (WorkflowRun.id is INTEGER PK); resolved from server-side session context ONLY; NEVER from tool arguments or any caller-supplied request field
     ) -> MCPToolResult:
         """
         Mandatory 9-step authorization sequence (F6/F7 correction):
@@ -789,20 +794,56 @@ class MCPService:
            c. mcp_server_id, tool_name, arguments_hash, and actor_id MUST match
               the current invocation; mismatch → MCPApprovalRequiredError.
            d. status MUST NOT be CONSUMED (replay prevention).
-        7. Call MCPApprovalRepository.consume_atomic(mcp_approval_id).
-           - If 0 rows updated (already consumed): raise ConsumedError → MCPApprovalRequiredError.
+           e. (S1) workflow_run_id binding check using trusted_workflow_run_id
+              (resolved from server-side session context, NOT from tool arguments):
+              - approval.workflow_run_id = X AND trusted_workflow_run_id = Y (X ≠ Y):
+                log mcp_approval_rejected(reason="workflow_run_mismatch"), raise MCPApprovalRequiredError.
+              - approval.workflow_run_id non-NULL AND trusted_workflow_run_id = NULL:
+                log mcp_approval_rejected(reason="missing_workflow_context"), raise MCPApprovalRequiredError.
+              - approval.workflow_run_id = NULL AND trusted_workflow_run_id non-NULL:
+                log mcp_approval_rejected(reason="unexpected_workflow_context"), raise MCPApprovalRequiredError.
+              This check runs BEFORE consume_atomic. A rejected invocation does NOT consume the approval.
+        7. Call MCPApprovalRepository.consume_atomic(mcp_approval_id, actor_id, server_name, tool_name, arguments_hash, trusted_workflow_run_id, now=datetime.now(UTC)).
+           consume_atomic executes a single DB transaction (C2/S2/T2 — all binding fields verified in-transaction):
+             i.   BEGIN IMMEDIATE; — acquires write lock immediately, preventing TOCTOU.
+             ii.  SELECT the MCPApproval row within the transaction.
+             iii. Within SAME transaction verify ALL bindings:
+                  a. actor_id matches; b. mcp_server_id matches; c. tool_name matches; d. arguments_hash matches;
+                  e. workflow_run_id matches trusted_workflow_run_id (NULL-safe: both NULL, or both equal integers);
+                  f. status = APPROVED; g. expires_at > now; h. consumed_at IS NULL.
+             iv.  UPDATE mcp_approvals SET status='CONSUMED', consumed_at=now WHERE id=? AND status='APPROVED' AND expires_at > now AND consumed_at IS NULL.
+             v.   Verify rowcount == 1 — if 0 rows updated → ROLLBACK; raise ConsumedError; log mcp_approval_already_consumed.
+             vi.  COMMIT BEFORE launching subprocess.
+           SQLite write-lock semantics: SQLite serializes writes at the database-file level. BEGIN IMMEDIATE
+           prevents another writer from modifying the row between SELECT and UPDATE. This is a SQLite
+           engine guarantee, NOT a SQLAlchemy connection-pool guarantee.
+           busy_timeout (recommended: 5000 ms): if BEGIN IMMEDIATE blocks due to contention, SQLite waits
+           up to busy_timeout ms before raising OperationalError/busy. Treat OperationalError as an
+           authorization failure; the caller may retry the DB operation only (not the MCP invocation),
+           up to a configurable maximum (e.g. 3 retries with exponential backoff).
+           - If 0 rows updated (already consumed or any binding mismatch): raise ConsumedError → MCPApprovalRequiredError.
            - Log mcp_approval_granted.
         8. Execute: call MCPClient.call_tool.
            - On subprocess launch: log mcp_tool_invoked (approval consumed, subprocess started).
            - On success: log mcp_tool_completed.
            - On exception/timeout: log mcp_tool_failed, re-raise.
            - IMPORTANT: execution failure does NOT restore MCPApproval to APPROVED. See §7.6b.
+           - After commit in step 7, subprocess launch and failure do NOT roll back consumption.
         9. Record all audit events without leaking credentials or argument values.
            Each audit event includes mcp_approval_id for traceability.
 
         Note: allow-list alone is NOT sufficient for consequential tools. Both checks are additive
         and sequential: allow-list check runs first; then classification + approval gate.
         Note: read_only tools proceed without mcp_approval_id (subject to allow-list only).
+        Note: trusted_workflow_run_id comes from server-side session context ONLY. Any
+        workflow_run_id value in the tool arguments payload is ignored for binding purposes.
+        Note: trusted_workflow_run_id is int | None — WorkflowRun.id is an INTEGER primary key
+        (T1). It is NOT a UUID. Only MCPApproval.id is UUID.
+        Note: datetime.now(UTC) is used throughout — datetime.utcnow() MUST NOT appear.
+        Note (C1): invoke_tool has exactly ONE workflow context parameter: trusted_workflow_run_id:
+        int | None. The redundant workflow_run_id parameter has been removed. trusted_workflow_run_id
+        is resolved by the application layer from the current execution session before calling
+        invoke_tool. It is never read from tool arguments, request body, or any client-supplied field.
         """
 ```
 
@@ -831,7 +872,55 @@ class MCPService:
 class MCPApprovalRepository(BaseRepository[MCPApproval]):
     async def create(self, approval: MCPApproval) -> MCPApproval: ...
     async def get_by_id(self, id: UUID) -> MCPApproval | None: ...
-    async def consume_atomic(self, id: UUID) -> MCPApproval: ...
+    async def consume_atomic(
+        self,
+        id: UUID,
+        actor_id: str,                         # C2: binding field — must match MCPApproval.actor_id
+        mcp_server_id: str,                    # C2: binding field — must match MCPApproval.mcp_server_id
+        tool_name: str,                        # C2: binding field — must match MCPApproval.tool_name
+        arguments_hash: str,                   # C2: binding field — must match MCPApproval.arguments_hash
+        trusted_workflow_run_id: int | None,   # T1/S1/C2: int | None — WorkflowRun.id is INTEGER PK; never from tool arguments
+        now: datetime,                         # S2: datetime.now(UTC); no utcnow()
+    ) -> MCPApproval:
+        """
+        Single-transaction atomic consumption (C2/S2/T2 — all binding fields verified in-transaction):
+        1. BEGIN IMMEDIATE; — acquires the write lock immediately, preventing TOCTOU between SELECT and UPDATE.
+        2. SELECT the MCPApproval row within the transaction.
+        3. Within the SAME transaction verify ALL of these:
+           a. actor_id matches the persisted MCPApproval.actor_id.
+           b. mcp_server_id matches the persisted MCPApproval.mcp_server_id.
+           c. tool_name matches the persisted MCPApproval.tool_name.
+           d. arguments_hash matches the persisted MCPApproval.arguments_hash.
+           e. status = APPROVED AND expires_at > now AND consumed_at IS NULL.
+        4. Verify workflow_run_id binding against trusted_workflow_run_id (S1 rules) within SAME transaction.
+           trusted_workflow_run_id is int | None — WorkflowRun.id is an INTEGER primary key (T1).
+           (NULL-safe: both NULL, or both equal integers must match.)
+        5. UPDATE mcp_approvals SET status='CONSUMED', consumed_at=now
+           WHERE id=? AND status='APPROVED' AND expires_at > now AND consumed_at IS NULL.
+        6. Verify rowcount == 1 — if 0 rows updated → ROLLBACK; raise ConsumedError; log mcp_approval_already_consumed.
+        7. COMMIT BEFORE returning (subprocess launch happens after commit, not inside the transaction).
+        8. If subprocess fails after COMMIT: approval remains CONSUMED — no rollback.
+        Raises ConsumedError on any binding mismatch, concurrent consumption, expiry during consumption,
+        or prior consumption. Uses datetime.now(UTC) — NOT datetime.utcnow().
+
+        C1 note: trusted_workflow_run_id is resolved by the application layer from the current execution
+        session before calling consume_atomic. It is never read from tool arguments, request body, or
+        any client-supplied field.
+
+        SQLite write-lock semantics (T2):
+        BEGIN IMMEDIATE acquires the write lock upfront for the entire transaction, preventing another
+        writer from modifying the approval row between SELECT and UPDATE. SQLite serializes writes at
+        the database-file level — only one write transaction holds the write lock at a time. This is a
+        SQLite engine guarantee, NOT a SQLAlchemy connection-pool guarantee.
+
+        busy_timeout: Configure the SQLite busy_timeout (recommended: 5000 ms) so that a competing
+        write transaction waits briefly rather than immediately raising OperationalError.
+
+        Lock contention: If BEGIN IMMEDIATE raises OperationalError/busy, treat it as an authorization
+        failure for the current request. The caller (MCPService) MAY retry the database operation only
+        (not the external MCP invocation) after a brief delay, up to a configurable maximum (e.g.
+        3 retries with exponential backoff).
+        """
     async def list_pending(self, server_id: str) -> list[MCPApproval]: ...
 ```
 
@@ -850,6 +939,7 @@ class MCPApprovalRepository(BaseRepository[MCPApproval]):
 | `mcp_approval_denied` | When an `MCPApproval` for an MCP tool is **explicitly rejected** by a human approver | NOT emitted on expiry |
 | `mcp_approval_expired` | When `MCPApproval.expires_at` is in the past — TTL elapsed before use | NOT `mcp_approval_denied`; expiry is not a human rejection |
 | `mcp_approval_missing` | When no `MCPApproval` is found (absent `mcp_approval_id` or record not in DB) for a consequential/unknown tool | NOT `mcp_approval_requested`; missing is a different error path |
+| `mcp_approval_rejected` | When workflow_run_id binding check fails (S1) — MUST include `reason` field: `workflow_run_mismatch` \| `missing_workflow_context` \| `unexpected_workflow_context` \| `mismatched_binding` \| `expired` \| `already_consumed` | Distinct from `mcp_approval_missing` and `mcp_approval_expired`; covers all authorization rejections at consumption time |
 | `mcp_tool_invoked` | After approval consumed and subprocess launched (before result known) | — |
 | `mcp_tool_completed` | After `MCPClient.call_tool` returns without exception | Distinct from `mcp_tool_invoked` |
 | `mcp_tool_failed` | After `MCPClient.call_tool` raises any exception or times out | — |
@@ -1559,6 +1649,7 @@ Key log events:
 | `mcp_approval_denied` | `MCPService` when an MCP `MCPApproval` is **explicitly rejected** by user (NOT expiry) | `"user"` |
 | `mcp_approval_expired` | `MCPService` when `MCPApproval.expires_at` is in the past — TTL elapsed, NOT a human rejection | `"system"` |
 | `mcp_approval_missing` | `MCPService` when no `MCPApproval` is found for a consequential/unknown tool | `"system"` |
+| `mcp_approval_rejected` | `MCPService` when any authorization check fails at invocation time — includes `reason` field: `workflow_run_mismatch` \| `missing_workflow_context` \| `unexpected_workflow_context` \| `mismatched_binding` \| `expired` \| `already_consumed` | `"system"` |
 | `mcp_tool_invoked` | `MCPService` after approval consumed and subprocess launched | `"system"` |
 | `mcp_tool_completed` | `MCPService` after `MCPClient.call_tool` returns success — DISTINCT from `mcp_tool_invoked` | `"system"` |
 | `mcp_tool_failed` | `MCPService` after `MCPClient.call_tool` raises or times out | `"system"` |

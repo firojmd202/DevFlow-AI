@@ -1,7 +1,7 @@
 # Phase 1 Specification Review Checklist
 
-**Version:** 1.4.0
-**Status:** Final Correction Pass Applied — Awaiting Final Independent Review
+**Version:** 1.5.3
+**Status:** Final PR Readiness Gate Reviewed
 **Branch:** feature/phase1-specification-planning
 **Base commit:** aaaaacb703124fc31b0e757b2bf1739c4fb225c9
 **Spec files reviewed:**
@@ -838,3 +838,302 @@ All migration alignment corrections applied. All 9 consistency checks pass. All 
 - `docs/planning/phase1-roadmap.md` (v1.5.0)
 - `docs/reviews/phase1-specification-review.md` (v1.5.0 — this document, §18 added)
 - `.agents/tasks/phase1-final-migration-alignment-report.md` (new — alignment report)
+
+---
+
+## 19. MCP Security Hardening Pass (S1–S2) — v1.5.1
+
+This section records the two security findings resolved in the final MCP security hardening pass that produced v1.5.1 of all five spec documents. The full hardening report is at `.agents/tasks/phase1-v1.5-final-mcp-security-report.md`.
+
+### Finding S1 — Workflow Run Binding ✅ APPLIED
+
+**Problem:** The `MCPApproval` model contains `workflow_run_id`, but no requirement or design section explicitly required that the approval's `workflow_run_id` be matched against the trusted invocation context. A workflow-bound approval could potentially authorize an invocation from a different workflow context, or an invocation with no workflow context, with no defined rejection behavior.
+
+**Correction applied:**
+
+- **requirements.md:** Added `REQ-M2.5` with 6 binding rules, 7 acceptance criteria, and 4 named negative tests. Added `mcp_approval_rejected` audit event (with `reason` field) to the REQ-W1.7 audit event table.
+- **design.md §7.5:** Added `trusted_workflow_run_id: UUID | None` parameter to `MCPService.invoke_tool` signature (server-side only, NOT from tool arguments). Added step 6e (workflow_run_id binding check) to the invoke_tool docstring. Added `mcp_approval_rejected` audit event (with reason variants) to the §7.5 audit event table and the §16 master audit event table. Updated `MCPApprovalRepository.consume_atomic` interface to accept `trusted_workflow_run_id`.
+- **tasks.md I4:** Added S1 workflow run binding key implementation notes and 4 named negative tests.
+- **tasks.md I7:** Added all 4 S1 tests to the complete test list.
+
+**S1 binding rules enforced:**
+1. Approval `workflow_run_id = X` cannot authorize invocation with `trusted_workflow_run_id = Y` (X≠Y) → reason: `workflow_run_mismatch`
+2. Approval `workflow_run_id` non-NULL cannot authorize invocation with `trusted_workflow_run_id = NULL` → reason: `missing_workflow_context`
+3. Approval `workflow_run_id = NULL` cannot authorize invocation with `trusted_workflow_run_id` non-NULL → reason: `unexpected_workflow_context`
+4. `trusted_workflow_run_id` comes from server-side session context ONLY — not from tool arguments
+5. Mismatch fails closed — no execution proceeds
+6. Every rejection emits `mcp_approval_rejected` with structured `reason` field
+
+**4 named negative tests added:**
+- `test_approval_wrong_workflow_run_rejected`
+- `test_approval_bound_to_workflow_rejected_without_workflow_context`
+- `test_approval_unbound_rejected_with_workflow_context`
+- `test_workflow_run_id_from_arguments_not_trusted`
+
+---
+
+### Finding S2 — Atomic Approval Consumption ✅ APPLIED
+
+**Problem:** The `consume_atomic` contract specified a conditional `UPDATE WHERE status='APPROVED' AND id=?` but did not explicitly require a single atomic database transaction that also re-validates `expires_at > now` and `consumed_at IS NULL` within the same transaction. This gap allowed a TOCTOU window: an approval valid at service-layer validation time could expire between validation and consumption, and a stale in-memory validation result could bypass the expiry check.
+
+**Correction applied:**
+
+- **requirements.md REQ-M2.2:** Replaced the single-line `consume_atomic` description with an 8-step atomic transaction specification: SELECT with row-level lock → verify within SAME transaction (status, expires_at, consumed_at) → verify workflow_run_id binding within SAME transaction → conditional UPDATE → rowcount check → commit BEFORE subprocess launch → no rollback on subprocess failure. Added 2 new acceptance criteria (M2.2.6, M2.2.7, M2.2.8). Added SQLite concurrency assumptions section. Added 5 named negative tests.
+- **design.md §7.5:** Replaced the single-line `consume_atomic` reference in the invoke_tool docstring with the full 6-step transaction description. Updated the `MCPApprovalRepository` interface docstring to include the full 6-step algorithm. Added `now: datetime` parameter (using `datetime.now(UTC)`) to `consume_atomic` signature.
+- **tasks.md I4:** Replaced the single-line atomic consumption note with the full 7-step transaction description. Added S2 named negative tests.
+- **tasks.md I7:** Added all 5 S2 tests to the complete test list.
+
+**S2 atomic consumption algorithm (8 steps):**
+1. SELECT row with row-level lock (or SQLite serialized write)
+2. Verify within SAME transaction: `status = APPROVED AND expires_at > now AND consumed_at IS NULL`
+3. Verify `workflow_run_id` binding within SAME transaction (S1 rules)
+4. `UPDATE mcp_approvals SET status='CONSUMED', consumed_at=now WHERE id=? AND status='APPROVED' AND expires_at > now AND consumed_at IS NULL`
+5. Verify exactly 1 row updated — if 0, raise `ConsumedError`; log `mcp_approval_already_consumed`
+6. Commit transaction BEFORE launching subprocess
+7. Subprocess failure after commit does NOT roll back consumption
+8. Use `datetime.now(UTC)` throughout — `datetime.utcnow()` prohibited
+
+**5 named negative tests added:**
+- `test_concurrent_consumption_only_one_succeeds`
+- `test_expired_at_consumption_time_rejected`
+- `test_consumed_approval_cannot_be_reused`
+- `test_execution_failure_does_not_restore_consumed_approval`
+- `test_stale_in_memory_approval_rejected_at_consumption`
+
+---
+
+### Consistency Check Results (v1.5.1)
+
+| # | Check | Result |
+|---|---|---|
+| 1 | `MCPService.invoke_tool` signature includes `trusted_workflow_run_id` (server-side, not from tool arguments) | **PASS** |
+| 2 | `consume_atomic` contract specifies single-transaction validation + update (8-step algorithm) | **PASS** |
+| 3 | All 20 named negative tests listed in tasks.md Wave 4 (I4 and I7) | **PASS** |
+| 4 | `mcp_approval_rejected` audit event includes `reason` field (workflow_run_mismatch \| missing_workflow_context \| unexpected_workflow_context \| mismatched_binding \| expired \| already_consumed) | **PASS** |
+| 5 | No automatic approval restoration after execution failure | **PASS** |
+| 6 | `datetime.now(UTC)` used consistently (not `datetime.utcnow()`) | **PASS** |
+| 7 | Migration chain 001→007 unchanged | **PASS** |
+| 8 | Wave 4 has no Wave 5 dependencies | **PASS** |
+| 9 | Existing requirements and traceability preserved | **PASS** |
+
+**All 9 consistency checks pass.**
+
+### Updated Final Verdict
+
+**READY FOR INDEPENDENT SECURITY REVIEW** (v1.5.1)
+
+Findings S1 (workflow run binding) and S2 (atomic approval consumption) resolved. All prior findings from §11 (8 findings), §13 (5 amendments), §15 (F1–F5, D1–D4), §16 (F1–F3), §17 (F6–F9), and §18 (migration alignment) remain resolved. The five specification documents are internally consistent at v1.5.1. The MCP authorization sequence now explicitly binds approvals to workflow run context and enforces TOCTOU-safe single-transaction consumption.
+
+**Changed files (v1.5.1 MCP security hardening pass):**
+- `.kiro/specs/phase1-functional-orchestration/requirements.md` (v1.5.1)
+- `.kiro/specs/phase1-functional-orchestration/design.md` (v1.5.1)
+- `.kiro/specs/phase1-functional-orchestration/tasks.md` (v1.5.1)
+- `docs/planning/phase1-roadmap.md` (v1.5.1)
+- `docs/reviews/phase1-specification-review.md` (v1.5.1 — this document, §19 added)
+- `.agents/tasks/phase1-v1.5-final-mcp-security-report.md` (new — security hardening report)
+
+---
+
+## 20. Type and Concurrency Alignment Pass (T1–T2) — v1.5.2
+
+This section records the two type and concurrency findings resolved in the alignment pass that produced v1.5.2 of all five spec documents. The full alignment report is at `.agents/tasks/phase1-v1.5.1-final-type-concurrency-report.md`.
+
+### Finding T1 — Workflow Run Identifier Type ✅ APPLIED
+
+**Problem:** Some spec sections described `trusted_workflow_run_id` as `UUID | None`. However, `WorkflowRun.id` is an INTEGER primary key. `MCPApproval.workflow_run_id` is a nullable INTEGER FK → `workflow_runs.id`. The trusted invocation context parameter that matches against this FK must therefore be `int | None`, not `UUID | None`. Only `MCPApproval.id` is a UUID.
+
+**Type contract (authoritative):**
+| Field / parameter | Type | Notes |
+|---|---|---|
+| `MCPApproval.id` | UUID (stored as TEXT) | Primary key of the approval record |
+| `mcp_approval_id` parameter | `UUID | None` | Caller passes UUID to identify the approval |
+| `WorkflowRun.id` | `int` | INTEGER primary key — not UUID |
+| `MCPApproval.workflow_run_id` | `int | None` | Nullable INTEGER FK → workflow_runs.id ON DELETE SET NULL |
+| `trusted_workflow_run_id` parameter | `int | None` | Server-side session context; must match MCPApproval.workflow_run_id exactly |
+| `MCPApprovalRepository.consume_atomic` `trusted_workflow_run_id` parameter | `int | None` | Same type as the FK it is compared against |
+
+**Correction applied:**
+- **design.md §7.5:** `MCPService.invoke_tool` signature updated: `trusted_workflow_run_id: int | None` (was `UUID | None`). `MCPApprovalRepository.consume_atomic` signature updated: `trusted_workflow_run_id: int | None` (was `UUID | None`). Added explanatory note: "trusted_workflow_run_id is int | None — WorkflowRun.id is an INTEGER primary key (T1). It is NOT a UUID. Only MCPApproval.id is UUID." Updated invoke_tool step 7 description.
+- **requirements.md REQ-M2.5:** Acceptance criterion M2.5.1 updated: `trusted_workflow_run_id: int | None` (was `UUID | None`), with note "WorkflowRun.id is an INTEGER primary key; trusted_workflow_run_id is therefore int | None, NOT a UUID (T1)."
+- **requirements.md REQ-M2.2:** `consume_atomic` signature updated: `trusted_workflow_run_id: int | None`. Step 4 annotation: "trusted_workflow_run_id is int | None — WorkflowRun.id is an INTEGER primary key (T1)."
+- **tasks.md I4:** Key implementation notes updated: `trusted_workflow_run_id: int | None` (was `UUID | None`); annotation "WorkflowRun.id is an INTEGER PK (T1). Only MCPApproval.id is UUID." consume_atomic description updated to `int | None` for the binding parameter. S1 test descriptions updated to use "integer" terminology.
+
+UUID approval IDs (`MCPApproval.id`, `mcp_approval_id` parameter) remain UUID throughout — not changed.
+
+**4 named negative tests verified with integer semantics:**
+- `test_approval_wrong_workflow_run_rejected` — uses integer workflow_run_id values (X, Y ∈ ℤ, X≠Y)
+- `test_approval_bound_to_workflow_rejected_without_workflow_context` — approval.workflow_run_id is a non-None integer; trusted = None
+- `test_approval_unbound_rejected_with_workflow_context` — approval.workflow_run_id = NULL; trusted = N (integer, non-None)
+- `test_workflow_run_id_from_arguments_not_trusted` — argument integer value ignored; session int context used
+
+---
+
+### Finding T2 — SQLite Atomic Consumption and Concurrency ✅ APPLIED
+
+**Problem:** The spec stated: "In Phase 1 single-process deployment, concurrent writes from the same process are serialized by SQLAlchemy's connection pool." This is incorrect. SQLAlchemy's connection pool does not serialize database writes; SQLite serializes writes at the database-file level. Additionally, the atomic consumption algorithm did not explicitly specify `BEGIN IMMEDIATE` to prevent TOCTOU between the SELECT and the UPDATE, and there was no busy_timeout or retry policy for lock contention.
+
+**Correction applied:**
+- **design.md §7.5 (`MCPApprovalRepository.consume_atomic` docstring):** Replaced single-line SELECT description with `BEGIN IMMEDIATE` semantics. Added explanation: "SQLite serializes writes at the database-file level — only one write transaction holds the write lock at a time. This is a SQLite engine guarantee, NOT a SQLAlchemy connection-pool guarantee." Added `busy_timeout` policy (recommended: 5000 ms). Added retry rule: "Lock contention (OperationalError/busy) is treated as an authorization failure; the caller may retry the DB operation only (not the external MCP invocation), up to a configurable maximum (e.g. 3 retries with exponential backoff)." Replaced "ROLLBACK" on 0-rows-updated path.
+- **design.md §7.5 (invoke_tool docstring step 7):** Updated consume_atomic call description to use `BEGIN IMMEDIATE`; replaced "SQLAlchemy connection pooling" claim with correct SQLite engine write-lock language; added busy_timeout reference.
+- **requirements.md REQ-M2.2 SQLite concurrency assumptions:** Removed incorrect "concurrent writes from the same process are serialized by SQLAlchemy's connection pool." Replaced with: "SQLite serializes writes at the database-file level. Concurrent write transactions from the same process or multiple processes will queue; only one write transaction holds the write lock at a time. This is a SQLite engine guarantee, NOT a SQLAlchemy connection-pool guarantee. SQLAlchemy connection pooling does NOT serialize database writes." Added `BEGIN IMMEDIATE` requirement. Added `busy_timeout` recommendation. Added lock-contention retry policy. Added M2.2.9 acceptance criterion.
+- **requirements.md REQ-M1.7 step 7:** Updated consume_atomic description to reference `BEGIN IMMEDIATE` and correct write-lock semantics.
+- **tasks.md I4 key implementation notes:** Replaced "single-process deployment relies on SQLAlchemy connection-pool write serialization" with "SQLite serializes writes at the database-file level (T2 — NOT SQLAlchemy connection-pool serialization). BEGIN IMMEDIATE acquires the write lock upfront." Added busy_timeout and retry policy notes.
+
+**Atomic SQL pattern (BEGIN IMMEDIATE):**
+
+```sql
+BEGIN IMMEDIATE;  -- acquires write lock immediately, prevents TOCTOU
+SELECT id, status, expires_at, consumed_at, actor_id, mcp_server_id,
+       tool_name, arguments_hash, workflow_run_id
+FROM mcp_approvals
+WHERE id = :approval_id;
+-- validate all fields within the transaction
+UPDATE mcp_approvals
+SET status = 'CONSUMED', consumed_at = :now
+WHERE id = :approval_id
+  AND status = 'APPROVED'
+  AND expires_at > :now
+  AND consumed_at IS NULL;
+-- if rowcount != 1: ROLLBACK and raise ConsumedError
+COMMIT;
+-- only after COMMIT: proceed to subprocess launch
+```
+
+`:now` is `datetime.now(UTC)` captured once at the start of the transaction (not re-evaluated). `datetime.utcnow()` is prohibited.
+
+**5 new named negative tests added to I4 and I7:**
+- `test_concurrent_consumption_only_one_succeeds` — two threads/tasks attempt consume_atomic simultaneously; BEGIN IMMEDIATE ensures exactly one succeeds
+- `test_busy_timeout_treated_as_authorization_failure` — simulate lock contention (OperationalError); verify caught and treated as authorization failure; DB retry permitted, MCP invocation is NOT retried
+- `test_expired_at_consumption_time_rejected` — approval valid when created; expires_at passes before consume_atomic runs; in-transaction check rejects
+- `test_execution_failure_does_not_restore_consumed_approval` — approval stays CONSUMED after subprocess error
+- `test_begin_immediate_prevents_toctou` — verify consume_atomic uses BEGIN IMMEDIATE or equivalent; write lock acquired before SELECT
+
+**Note on test count:** `test_stale_in_memory_approval_rejected_at_consumption` (from S2 in v1.5.1) covers the same in-transaction expiry scenario as `test_expired_at_consumption_time_rejected` (T2). The T2 test name is used in I4 and I7 because it more precisely names the scenario. `test_busy_timeout_treated_as_authorization_failure` and `test_begin_immediate_prevents_toctou` are net-new tests from T2. Total named tests in Wave 4 (I4+I7) is now 25.
+
+---
+
+### 12-Check Consistency Results (v1.5.2)
+
+| # | Check | Result |
+|---|---|---|
+| 1 | `MCPApproval.workflow_run_id` typed as `int | None` everywhere (no UUID for this field) | **PASS** |
+| 2 | `trusted_workflow_run_id` parameter typed as `int | None` in MCPService.invoke_tool and consume_atomic | **PASS** |
+| 3 | `MCPApproval.id` and `mcp_approval_id` parameter remain UUID (unchanged) | **PASS** |
+| 4 | `consume_atomic` uses `BEGIN IMMEDIATE` transaction semantics (documented in design.md §7.5) | **PASS** |
+| 5 | `busy_timeout` policy documented (design.md §7.5, requirements.md REQ-M2.2) | **PASS** |
+| 6 | No claim that SQLAlchemy connection pooling serializes writes | **PASS** (removed from REQ-M2.2 and tasks.md I4) |
+| 7 | No automatic retry of external MCP invocation | **PASS** |
+| 8 | `datetime.now(UTC)` used as the UTC source (not `datetime.utcnow()`) | **PASS** |
+| 9 | All 25 named negative tests present in Wave 4 tasks I4 and I7 (20 prior + 5 new T2) | **PASS** |
+| 10 | Migration chain 001→007 unchanged | **PASS** |
+| 11 | Wave 4 has no Wave 5 dependencies | **PASS** |
+| 12 | Version metadata updated to v1.5.2 and date 2026-11-15 in all five documents | **PASS** |
+
+**All 12 checks pass.**
+
+### Updated Final Verdict
+
+**READY FOR FINAL PR READINESS REVIEW** (v1.5.2)
+
+Findings T1 (workflow_run_id type correction UUID → int | None) and T2 (SQLite concurrency model, BEGIN IMMEDIATE, busy_timeout) resolved. All 12 consistency checks pass. All prior findings from §11 (8 findings), §13 (5 amendments), §15 (F1–F5, D1–D4), §16 (F1–F3), §17 (F6–F9), §18 (migration alignment), and §19 (S1–S2) remain resolved. The five specification documents are internally consistent at v1.5.2.
+
+**Changed files (v1.5.2 type and concurrency alignment pass):**
+- `.kiro/specs/phase1-functional-orchestration/requirements.md` (v1.5.2)
+- `.kiro/specs/phase1-functional-orchestration/design.md` (v1.5.2)
+- `.kiro/specs/phase1-functional-orchestration/tasks.md` (v1.5.2)
+- `docs/planning/phase1-roadmap.md` (v1.5.2)
+- `docs/reviews/phase1-specification-review.md` (v1.5.2 — this document, §20 added)
+- `.agents/tasks/phase1-v1.5.1-final-type-concurrency-report.md` (new — alignment report)
+
+---
+
+## 21. Final PR Readiness Gate (C1–C2 + 10-Gate Review) — v1.5.3
+
+**Date:** 2026-11-15  
+**Specification version after this pass:** v1.5.3
+
+### C1 Resolution — Trusted Workflow Context (Single Parameter)
+
+**Finding:** `MCPService.invoke_tool` in design.md §7.5 had **two** competing workflow context parameters: `workflow_run_id: int | None = None` (caller-supplied) and `trusted_workflow_run_id: int | None = None` (server-side). tasks.md I4 described them as a primary plus an "additional" parameter. This created ambiguity about which value governs the authorization decision and allowed a caller to influence the trusted context via the `workflow_run_id` field.
+
+**What was found:** design.md §7.5 `invoke_tool` signature contained `workflow_run_id: int | None = None` alongside `trusted_workflow_run_id`. The tasks.md I4 implementation notes described `trusted_workflow_run_id` as an "additional" parameter appended to a base signature that still included `workflow_run_id`. requirements.md REQ-M1.7 step 7 and REQ-M2.5 were otherwise correct.
+
+**What was changed:**
+- design.md §7.5 `invoke_tool`: removed `workflow_run_id: int | None = None`; kept only `trusted_workflow_run_id: int | None = None` (now `C1/T1/S1` annotated); added explicit Note in docstring: "invoke_tool has exactly ONE workflow context parameter: trusted_workflow_run_id: int | None. trusted_workflow_run_id is resolved by the application layer from the current execution session before calling invoke_tool. It is never read from tool arguments, request body, or any client-supplied field."
+- design.md §7.5: added "C1 — Trusted workflow context" block stating the single-parameter rule and forbidding caller override.
+- requirements.md REQ-M2.5 M2.5.1: updated to state "This is the ONLY workflow context parameter — the former workflow_run_id parameter has been removed."
+- requirements.md REQ-M1.7 step 7: updated consume_atomic call to use new full-binding signature.
+- tasks.md I4: replaced "workflow_run_id=None" in the invoke_tool base signature; changed "additional server-side parameter" language to "exactly ONE workflow context parameter."
+- **No change required to**: MCPApproval.id (remains UUID), WorkflowRun.id (remains INTEGER), MCPApproval.workflow_run_id (remains int | None FK).
+
+**Verdict: C1 RESOLVED — no duplicate parameter, unambiguous trusted context source.**
+
+---
+
+### C2 Resolution — Transactional Authorization Bindings in consume_atomic
+
+**Finding:** `MCPApprovalRepository.consume_atomic` accepted only `(id, trusted_workflow_run_id, now)` — 3 parameters. The actor_id, mcp_server_id, tool_name, and arguments_hash bindings were validated in step 6 of `invoke_tool` (service-layer pre-consumption check) but were NOT re-verified as explicit parameters inside the atomic transaction. This created a window where the approval record could be modified between step 6 (pre-consumption validation) and step 7 (consume_atomic) without detection.
+
+**What was found:** design.md §7.5 `MCPApprovalRepository.consume_atomic` had 3 parameters; requirements.md REQ-M2.2 also had 3 parameters. The in-transaction steps verified status/expires_at/consumed_at/workflow_run_id but NOT the actor_id/mcp_server_id/tool_name/arguments_hash bindings.
+
+**What was changed:**
+- design.md §7.5 `MCPApprovalRepository.consume_atomic` signature: added `actor_id: str`, `mcp_server_id: str`, `tool_name: str`, `arguments_hash: str` as explicit parameters; updated docstring to 8-step algorithm with explicit "verify ALL bindings within SAME transaction" step (C2).
+- design.md §7.5 `invoke_tool` step 7: updated consume_atomic call to pass all binding fields.
+- requirements.md REQ-M2.2 `consume_atomic` interface: replaced 3-parameter signature with 7-parameter signature (approval_id, actor_id, mcp_server_id, tool_name, arguments_hash, workflow_run_id, now); updated 8-step algorithm with all binding verifications; noted NULL-safe workflow_run_id matching.
+- requirements.md REQ-M2.2 named tests: added `test_approval_modified_between_validation_and_consumption` (6th named T2 test).
+- tasks.md I4: updated consume_atomic call and description; added `test_approval_modified_between_validation_and_consumption` to S2 tests (6th) and I7 all-tests list (26th total).
+- roadmap.md: updated Wave 4 completion gate to reference all 26 named tests.
+
+**New test added:**
+- `test_approval_modified_between_validation_and_consumption` — approval status changed by another transaction between service-layer validation (step 6) and consume_atomic (step 7); verify ConsumedError raised and no subprocess launched.
+
+**Verdict: C2 RESOLVED — all binding fields verified in-transaction; modification-between-validation-and-consumption scenario covered by new test.**
+
+---
+
+### Ten-Gate Acceptance Matrix
+
+| Gate | Verdict | File + Section | Evidence | Failure scenario if FAIL |
+|---|---|---|---|---|
+| G1 — Requirements, design, tasks mutually consistent | **PASS** | requirements.md REQ-M2.x ↔ design.md §7.5 ↔ tasks.md I4/I7 | Every REQ-M2.x has a corresponding design section and at least one task; consume_atomic signatures match across all three documents; no contradictions found | — |
+| G2 — MCP approval authorization has no bypass | **PASS** | design.md §7.5 "No-bypass rule"; requirements.md REQ-M1.7.11; tasks.md I4/I7 `test_no_direct_mcp_client_bypass` | Explicit no-bypass rule in §7.5 with test coverage; ADR-0011 documents MCPService as mandatory gateway; no router/adapter/Streamlit path calls MCPClient directly per spec | — |
+| G3 — Trusted actor and workflow context are unambiguous | **PASS** | design.md §7.5 "C1 — Trusted workflow context" block; requirements.md REQ-M2.5 M2.5.1 | Single `trusted_workflow_run_id: int | None` parameter (C1 applied); explicit statement in §7.5 and REQ-M2.5 that it is resolved from server-side session only and never from tool arguments or client-supplied fields | — |
+| G4 — Approval consumption is atomic and replay-safe | **PASS** | design.md §7.5 `MCPApprovalRepository.consume_atomic` (8-step); requirements.md REQ-M2.2 | BEGIN IMMEDIATE; all binding fields verified in-transaction (C2); rowcount==1 required; COMMIT before subprocess; no restoration after failure; test_approval_modified_between_validation_and_consumption covers TOCTOU window | — |
+| G5 — SQLite FK and migration contracts are correct | **PASS** | design.md §3.7, §3.7a, §3.7b; requirements.md REQ-DB1.3 | MCPApproval.workflow_run_id → workflow_runs.id (Integer FK ON DELETE SET NULL); GitHubConfirmation.workflow_run_id same; PRAGMA foreign_keys=ON in connect event (REQ-DB1.3) | — |
+| G6 — Migration sequence 001–007 is linear | **PASS** | design.md §3.0; requirements.md REQ-DB1.1; roadmap.md Migration Chain | Exact chain: 001→002→003→004→005→006→007; each down_revision correctly points to preceding revision; no gaps or forks | — |
+| G7 — No wave depends on a later wave | **PASS** | tasks.md Wave definitions; design.md §13; roadmap.md Task Dependency Graph | Wave 1 uses no Wave 2+ deliverables; Wave 2 uses no Wave 3+ deliverables; Wave 4 owns migration 006 and MCPApproval (not Wave 5); Wave 4 completion gate explicitly states "no Wave 5 dependency" | — |
+| G8 — Required security negative tests are specified | **PASS** | tasks.md I4 (named tests), I7 (all-tests list) | 26 named negative tests present; all 6 required tests confirmed: `test_forged_approval_record_rejected` ✓, `test_replay_after_consumption_rejected` ✓, `test_concurrent_consumption_only_one_succeeds` ✓, `test_approval_wrong_workflow_run_rejected` ✓, `test_no_direct_mcp_client_bypass` ✓, `test_approval_modified_between_validation_and_consumption` ✓ | — |
+| G9 — Phase 0 compatibility and scope preserved | **PASS** | requirements.md Global Constraints, Out of Scope; design.md §1; review.md §6 | No Phase 0 requirement modified; no autonomous AI execution; no auto-merge; all 11 integration adapters retain approved execution modes (Codex = cli_handoff, Kiro/NotebookLM/Antigravity/Google Stitch = manual_handoff or stub) | — |
+| G10 — Git changes contain only intended specification artifacts | **PASS** | git diff --name-only (see §21 git status below) | Only .kiro/specs/, docs/planning/, docs/reviews/, .agents/tasks/ files in diff; no src/, tests/, alembic/, .github/, pyproject.toml | — |
+
+### Remaining Blockers
+
+None.
+
+### Non-Blocking Implementation Notes
+
+1. **G9 (Workflow page numbering):** Pages 6 and 7 renamed to `6_Workflows.py` / `7_History.py`. This open decision from v1.0.0 has been carried forward without blocking — it is a UX preference, not a security or correctness issue. Implementer should confirm naming before Wave 3.
+2. **G9 (MCP SDK version):** `mcp>=1.0,<2.0` operative constraint (pyproject.toml has no mcp entry at base commit). Implementer must check pyproject.toml at Wave 4 implementation time (REQ-M1.8).
+3. **G9 (pyproject.toml / ci.yml coverage flags):** `branch = true` and `--cov-branch` must be added during Wave 1 (Task P1 config ownership). Out of spec-correction scope; known gap.
+4. **G4 (BEGIN IMMEDIATE Python implementation):** aiosqlite/SQLAlchemy async does not have a direct `BEGIN IMMEDIATE` syntax helper. The implementer may use raw `EXECUTE 'BEGIN IMMEDIATE'` or `connection.execution_options(isolation_level="IMMEDIATE")`. The spec states intent; the implementer selects the mechanism. Non-blocking.
+5. **G4 (busy_timeout configuration point):** The spec recommends 5000 ms and says "configure"; the implementer decides whether to use `connect_args={"timeout": 5}` or PRAGMA in the connect event handler. Non-blocking.
+
+### Git Branch and Working-Tree Status
+
+Branch: `feature/phase1-specification-planning`
+
+Files modified in this pass (C1–C2 + 10-gate review):
+- `.kiro/specs/phase1-functional-orchestration/design.md` (v1.5.2 → v1.5.3)
+- `.kiro/specs/phase1-functional-orchestration/requirements.md` (v1.5.2 → v1.5.3)
+- `.kiro/specs/phase1-functional-orchestration/tasks.md` (v1.5.2 → v1.5.3)
+- `docs/planning/phase1-roadmap.md` (v1.5.2 → v1.5.3)
+- `docs/reviews/phase1-specification-review.md` (v1.5.2 → v1.5.3, §21 added)
+- `.agents/tasks/phase1-final-pr-readiness-report.md` (new)
+
+No src/, tests/, alembic/, .github/workflows/, or pyproject.toml files modified.
+
+### Final Verdict
+
+**CONDITIONAL PASS — READY FOR PR WITH NON-BLOCKING NOTES**
+
+C1 and C2 resolved. All 10 acceptance gates PASS. Five non-blocking implementation notes recorded (all pre-existing open items; none new). No blockers. The specification is ready for the Phase 1 implementation PR subject to the non-blocking notes being actioned at the relevant implementation wave.

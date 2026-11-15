@@ -1,7 +1,7 @@
 # DevFlow AI — Phase 1: Implementation Tasks
 
-**Version:** 1.4.0
-**Status:** Corrected — Awaiting Final Independent Review
+**Version:** 1.5.3
+**Status:** Corrected — Final PR Readiness Reviewed
 **Scope:** Phase 1 — Functional Orchestration
 **Branch:** feature/phase1-specification-planning
 **Base commit:** aaaaacb703124fc31b0e757b2bf1739c4fb225c9
@@ -15,6 +15,9 @@
 - v1.3.0 — Final specification correction: F1–F5 and D1–D4 applied (FK test split to Wave 1 / Wave 2, GitHubConfirmation persistence + migration 006 + 6 named tests in Wave 5, MCP 8-step sequence + 3 new audit events + named test, superseded guidance labelled, metadata corrected)
 - v1.4.0 — 2026-11-15 — Corrections F1 (MCP approval authorization via approval_request_id), F2 (FK cascade test corrections), F3 (metadata), F6 (MCPApproval dedicated schema + migration 007), F7 (outdated MCP authorization references), F8 (Wave 1 FK tests), F9 (approval consumption and external failure handling). Branch: feature/phase1-specification-planning, Base: aaaaacb703124fc31b0e757b2bf1739c4fb225c9.
 - v1.5.0 — Migration and dependency alignment: 006=mcp_approvals (Wave 4, Task I4); 007=github_confirmations (Wave 5, Task G1); Task I4 deliverables updated (MCPApproval model/repo/migration 006 moved here from G1); Task G1 updated (migration 007, GitHubConfirmation only); down_revision chain corrected throughout. Branch: feature/phase1-specification-planning.
+- v1.5.1 — MCP Security Hardening Pass (S1–S2): S1 workflow_run_id binding: 4 negative tests added to I4 named tests and I7 all-tests list; trusted_workflow_run_id parameter added to I4 key implementation notes; S2 atomic consumption: 5 negative tests added to I4 and I7; mcp_approval_rejected audit event noted; all 20 negative tests verified present in I7. Branch: feature/phase1-specification-planning.
+- v1.5.2 — 2026-11-15 — Type and Concurrency Alignment Pass (T1–T2): T1 trusted_workflow_run_id type corrected UUID → int | None in Task I4 key implementation notes and consume_atomic description; T2 SQLite concurrency model clarified in Task I4: removed incorrect pooling-serializes-writes claim, added BEGIN IMMEDIATE, busy_timeout policy, and retry rules; 5 new T2 negative tests added to I4 named tests and I7 all-tests list; total named tests in I7 now 25. Branch: feature/phase1-specification-planning.
+- v1.5.3 — 2026-11-15 — Final PR Readiness Gate (C1–C2): C1 redundant workflow_run_id parameter removed from invoke_tool (I4 key implementation notes); only trusted_workflow_run_id: int | None remains; added explicit statement that trusted_workflow_run_id is resolved from server-side session context and never from tool arguments or client-supplied fields. C2 consume_atomic signature extended with all binding fields (I4 atomic consumption notes); in-transaction verification of all bindings documented; test_approval_modified_between_validation_and_consumption added to S2 tests and I7 all-tests list (now 26 total). Branch: feature/phase1-specification-planning.
 
 ---
 
@@ -863,9 +866,23 @@ def downgrade() -> None:
 - Log `arg_keys = list(arguments.keys())` — NEVER log argument values.
 - Terminate subprocess unconditionally in `finally` using SIGTERM → 5s grace → SIGKILL sequence.
 - Subprocess MUST be launched with `env=resolved_env` (not `env=None`).
-- `MCPService.invoke_tool` signature: `invoke_tool(server_name, tool_name, arguments, actor_id, workflow_run_id=None, mcp_approval_id=None)`. The parameter is `mcp_approval_id: UUID | None`, NOT `approval_request_id` and NOT `approval_record`. Callers MUST NOT pass a pre-built approval object.
+- `MCPService.invoke_tool` signature: `invoke_tool(server_name, tool_name, arguments, actor_id, mcp_approval_id=None, trusted_workflow_run_id=None)`. The parameter is `mcp_approval_id: UUID | None`, NOT `approval_request_id` and NOT `approval_record`. The `workflow_run_id` parameter has been removed (C1). Callers MUST NOT pass a pre-built approval object.
+- `MCPService.invoke_tool` has exactly ONE workflow context parameter: `trusted_workflow_run_id: int | None` (C1/T1/S1). `WorkflowRun.id` is an INTEGER primary key — this parameter is `int | None`, NOT a UUID. Only `MCPApproval.id` is UUID. This value is resolved from the server-side session context ONLY and MUST NOT be accepted via the tool arguments payload. It is resolved by the application layer from the current execution session before calling `invoke_tool` and is never read from tool arguments, request body, or any client-supplied field. The workflow_run_id binding check runs BEFORE `consume_atomic`.
+- Workflow run ID binding rules (S1 — all enforced before `consume_atomic`):
+  - approval.workflow_run_id = X AND trusted = Y (X≠Y) → reject, reason `workflow_run_mismatch`, log `mcp_approval_rejected`
+  - approval.workflow_run_id non-NULL AND trusted = NULL → reject, reason `missing_workflow_context`, log `mcp_approval_rejected`
+  - approval.workflow_run_id = NULL AND trusted non-NULL → reject, reason `unexpected_workflow_context`, log `mcp_approval_rejected`
+  - A rejected binding check does NOT consume the approval.
 - `MCPService` retrieves the `MCPApproval` from `MCPApprovalRepository` by `mcp_approval_id` and validates it internally (status == APPROVED, not expired, field match, not already CONSUMED). `MCPService` MUST NOT use `ApprovalRequestRepository` — that is for workflow step approvals only.
-- Atomic consumption: `MCPApprovalRepository.consume_atomic(mcp_approval_id)` sets `status = CONSUMED` and `consumed_at = now(UTC)` via `UPDATE ... WHERE status = 'APPROVED' AND id = ?`. If 0 rows updated, raises `ConsumedError` (replay prevention and concurrent-call safety).
+- Atomic consumption: `MCPApprovalRepository.consume_atomic(mcp_approval_id, actor_id, server_name, tool_name, arguments_hash, trusted_workflow_run_id, now=datetime.now(UTC))` executes a single DB transaction (C2/S2/T2):
+  1. `BEGIN IMMEDIATE;` — acquires the SQLite write lock before the SELECT, preventing TOCTOU.
+  2. SELECT row within the transaction.
+  3. Within SAME transaction verify ALL bindings: a. actor_id; b. mcp_server_id; c. tool_name; d. arguments_hash; e. workflow_run_id against trusted_workflow_run_id (NULL-safe); f. status=APPROVED AND expires_at > now AND consumed_at IS NULL.
+  4. UPDATE mcp_approvals SET status='CONSUMED', consumed_at=now WHERE id=? AND status='APPROVED' AND expires_at > now AND consumed_at IS NULL.
+  5. Verify rowcount == 1 — if 0 rows updated → ROLLBACK; raise ConsumedError; log `mcp_approval_already_consumed`.
+  6. COMMIT BEFORE returning to MCPService.
+  Uses `datetime.now(UTC)` throughout — `datetime.utcnow()` MUST NOT be used.
+  SQLite concurrency (T2): SQLite serializes writes at the database-file level — only one write transaction holds the write lock at a time. This is a SQLite engine guarantee, NOT a SQLAlchemy connection-pool guarantee. BEGIN IMMEDIATE acquires the write lock upfront for the entire transaction. Configure `busy_timeout` (recommended: 5000 ms) to allow brief waits under contention. Lock contention (OperationalError/busy) is treated as an authorization failure; the caller may retry the DB operation only (not the external MCP invocation), up to a configurable maximum (e.g. 3 retries with exponential backoff). In-transaction binding verification prevents a modification between service-layer validation (step 6 of invoke_tool) and consumption (step 7).
 - `MCPService` owns the approval gate: allow-list check → classification → retrieve `MCPApproval` by `mcp_approval_id` → validate → `consume_atomic` → `MCPClient.call_tool`. All eight MCP audit events are emitted by `MCPService`.
 - Failure semantics (F9): after `consume_atomic`, if `MCPClient.call_tool` fails, the `MCPApproval` remains CONSUMED — it is NOT restored. Log `mcp_tool_failed`. A new `MCPApproval` is required for retry.
 - No code path may call `MCPClient.call_tool` directly from a router, adapter, or any other layer; all MCP calls must go through `MCPService.invoke_tool`.
@@ -900,6 +917,20 @@ def downgrade() -> None:
 - `test_concurrent_consumption_safe` — two concurrent `invoke_tool` calls with the same `mcp_approval_id` result in exactly one success and one `MCPApprovalRequiredError` (atomic consumption via `MCPApprovalRepository.consume_atomic`)
 - `test_read_only_tool_no_approval_required` — `read_only` classified tool proceeds without `mcp_approval_id`
 - `test_no_direct_mcp_client_bypass` — integration test verifying no router or adapter calls `MCPClient.call_tool` directly without going through `MCPService.invoke_tool`
+
+**S1 workflow run binding tests (MUST also be present — from Finding S1):**
+- `test_approval_wrong_workflow_run_rejected` — approval.workflow_run_id = X (integer), invocation trusted_workflow_run_id = Y (integer, X≠Y) → rejected; mcp_approval_rejected audit event emitted with reason=workflow_run_mismatch; approval NOT consumed
+- `test_approval_bound_to_workflow_rejected_without_workflow_context` — approval.workflow_run_id non-NULL (integer), trusted_workflow_run_id = None → rejected; reason=missing_workflow_context; approval NOT consumed
+- `test_approval_unbound_rejected_with_workflow_context` — approval.workflow_run_id = NULL, trusted_workflow_run_id = N (integer, non-None) → rejected; reason=unexpected_workflow_context; approval NOT consumed
+- `test_workflow_run_id_from_arguments_not_trusted` — caller passes workflow_run_id in tool arguments payload; server ignores argument value and uses session context (None); approval with non-NULL workflow_run_id (integer) → rejected
+
+**S2 atomic consumption tests (MUST also be present — from Finding S2, updated for T2/C2):**
+- `test_concurrent_consumption_only_one_succeeds` — two concurrent consume_atomic calls: exactly one succeeds, one raises ConsumedError (strengthened from test_concurrent_consumption_safe; explicitly tests the in-transaction UPDATE rowcount check; BEGIN IMMEDIATE ensures only one writer proceeds)
+- `test_expired_at_consumption_time_rejected` — approval passes pre-consumption validation (expires_at in future) but expires_at elapses before consume_atomic executes; in-transaction check rejects it; ConsumedError raised; no subprocess launched
+- `test_consumed_approval_cannot_be_reused` — consume_atomic on an already-CONSUMED approval raises ConsumedError (0 rows updated); distinct from test_replay_after_consumption_rejected (which tests the service layer check)
+- `test_execution_failure_does_not_restore_consumed_approval` — after consume_atomic succeeds and subprocess raises, MCPApproval remains CONSUMED (status not restored); mcp_tool_failed audit event logged
+- `test_begin_immediate_prevents_toctou` — verify consume_atomic uses BEGIN IMMEDIATE (write lock acquired before SELECT); a second writer attempting to modify the same row concurrently does not create a TOCTOU window
+- `test_approval_modified_between_validation_and_consumption` — approval status changed by another transaction between the MCPService pre-consumption validation (step 6 of invoke_tool) and the consume_atomic call (step 7); verify ConsumedError raised and no subprocess launched (C2)
 
 **Additional named tests (MUST also be present — from prior specification, updated for F6):**
 - `test_unknown_tool_denied_without_approval` — MCPService raises MCPApprovalRequiredError for unknown tool without mcp_approval_id
@@ -1030,6 +1061,17 @@ Replace `9_Integrations.py` placeholder with live integration status. Extend `10
 - `test_execution_failure_does_not_restore_approval` ← F9 required (MCPApproval stays CONSUMED after failure)
 - `test_timeout_recorded_as_indeterminate_in_audit` ← F9 required (timeout logs mcp_tool_failed)
 - `test_new_approval_required_for_retry_after_failure` ← F9 required (new MCPApproval needed for retry)
+- `test_approval_wrong_workflow_run_rejected` ← S1 required (workflow_run_id mismatch; reason=workflow_run_mismatch; approval not consumed)
+- `test_approval_bound_to_workflow_rejected_without_workflow_context` ← S1 required (non-NULL approval.workflow_run_id, NULL trusted → rejected; reason=missing_workflow_context)
+- `test_approval_unbound_rejected_with_workflow_context` ← S1 required (NULL approval.workflow_run_id, non-NULL trusted → rejected; reason=unexpected_workflow_context)
+- `test_workflow_run_id_from_arguments_not_trusted` ← S1 required (argument-supplied workflow_run_id ignored; session context used)
+- `test_concurrent_consumption_only_one_succeeds` ← S2/T2 required (in-transaction UPDATE rowcount check; BEGIN IMMEDIATE; exactly one success, one ConsumedError)
+- `test_expired_at_consumption_time_rejected` ← S2 required (approval valid at check time, expired at consume_atomic time; in-transaction check rejects)
+- `test_consumed_approval_cannot_be_reused` ← S2 required (consume_atomic on CONSUMED raises ConsumedError)
+- `test_execution_failure_does_not_restore_consumed_approval` ← S2 required (subprocess failure; approval remains CONSUMED)
+- `test_busy_timeout_treated_as_authorization_failure` ← T2 required (simulate lock contention/OperationalError; verify treated as authorization failure; DB-only retry permitted)
+- `test_begin_immediate_prevents_toctou` ← T2 required (verify consume_atomic uses BEGIN IMMEDIATE; write lock before SELECT)
+- `test_approval_modified_between_validation_and_consumption` ← C2 required (approval modified between service-layer validation and consume_atomic; ConsumedError raised; no subprocess launched)
 - `test_integrations_page_renders` (mocked APIClient)
 - `test_settings_page_renders` (mocked APIClient)
 

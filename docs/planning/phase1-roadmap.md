@@ -1,7 +1,7 @@
 # DevFlow AI — Phase 1 Implementation Roadmap
 
-**Version:** 1.4.0
-**Status:** Amendment Round Applied — Awaiting Final Independent Review
+**Version:** 1.5.3
+**Status:** Amendment Round Applied — Final PR Readiness Reviewed
 **Branch:** feature/phase1-specification-planning
 **Base commit:** aaaaacb703124fc31b0e757b2bf1739c4fb225c9
 **Last Updated:** 2026-11-15
@@ -14,6 +14,9 @@
 - v1.3.0 — Final specification correction: F1–F5 and D1–D4 applied (FK test split, GitHubConfirmation persistence + migration 006, MCP authorization consistency, superseded guidance labelled, metadata corrected)
 - v1.4.0 — 2026-11-15 — Corrections F1 (MCP approval authorization via approval_request_id), F2 (FK cascade test corrections), F3 (metadata), F6 (MCPApproval dedicated schema + migration 007), F7 (outdated MCP authorization references), F8 (Wave 1 FK tests), F9 (approval consumption and external failure handling). Branch: feature/phase1-specification-planning, Base: aaaaacb703124fc31b0e757b2bf1739c4fb225c9.
 - v1.5.0 — Migration and dependency alignment: 006=mcp_approvals (Wave 4, Task I4), 007=github_confirmations (Wave 5, Task G1); down_revision chain updated; Wave 4 completion gate updated; Wave 5 task G1 and G5 updated. Branch: feature/phase1-specification-planning.
+- v1.5.1 — MCP Security Hardening Pass (S1–S2): Wave 4 completion gate updated to require all 20 MCP negative tests passing; Security Summary table updated with workflow_run_id binding requirement and atomic consumption note. Branch: feature/phase1-specification-planning.
+- v1.5.2 — 2026-11-15 — Type and Concurrency Alignment Pass (T1–T2): Wave 4 completion gate updated to require all 25 MCP negative tests (20 from S1/S2 + 5 new T2 tests); Security Summary MCP row updated to note int | None type for trusted_workflow_run_id and BEGIN IMMEDIATE transaction semantics; version metadata updated. Branch: feature/phase1-specification-planning.
+- v1.5.3 — 2026-11-15 — Final PR Readiness Gate (C1–C2): C1 redundant workflow_run_id parameter removed from invoke_tool (single trusted_workflow_run_id: int | None); C2 consume_atomic extended with all binding fields; test_approval_modified_between_validation_and_consumption added; Wave 4 completion gate updated to require all 26 named tests; Security Summary MCP row updated. Branch: feature/phase1-specification-planning.
 
 ---
 
@@ -164,7 +167,7 @@ Phase 1 adds six migrations in this exact chain:
 | I6 | Integrations router extension + Settings | Small |
 | I7 | Streamlit: Integrations + Settings + Tests | Large |
 
-**Wave 4 completion gate:** `pytest -v --cov=src --cov-branch --cov-fail-under=80 --cov-report=term-missing` exits with code 0; `registry.get_live("github")` returns live adapter when token is set, stub otherwise; MCP permission gate tested; secrets not in logs (test named `test_github_token_not_in_log_records`); subprocess env isolation tested (test named `test_mcp_subprocess_launched_with_explicit_env`); timeout test named; migration 006 (`006_add_mcp_approvals`) applied; MCP approval gate tests passing (all 8 named tests in `test_mcp_service.py`). Wave 4 has no dependency on any Wave 5 deliverable.
+**Wave 4 completion gate:** `pytest -v --cov=src --cov-branch --cov-fail-under=80 --cov-report=term-missing` exits with code 0; `registry.get_live("github")` returns live adapter when token is set, stub otherwise; MCP permission gate tested; secrets not in logs (test named `test_github_token_not_in_log_records`); subprocess env isolation tested (test named `test_mcp_subprocess_launched_with_explicit_env`); timeout test named; migration 006 (`006_add_mcp_approvals`) applied; MCP approval gate tests passing (all 26 named tests in `test_mcp_service.py`, including S1 workflow_run_id binding tests, S2 atomic consumption tests, T2 concurrency/BEGIN IMMEDIATE tests, and C2 modification-between-validation test). Wave 4 has no dependency on any Wave 5 deliverable.
 
 ---
 
@@ -229,7 +232,7 @@ Every consequential action in Phase 1 requires explicit authorization. No action
 | Create branch | `GitHubConfirmation` record (`confirmation_id` in request) | Explicit user acknowledgement; boolean flag alone rejected |
 | Create PR | `GitHubConfirmation` record (`confirmation_id` in request) | Explicit user acknowledgement; boolean flag alone rejected |
 | Workflow step with external side-effect | `ApprovalRequest` resolved to `approved` | Human approval gate |
-| MCP tool call | (1) Tool in `MCPServerConfig.allowed_tools` AND (2) `MCPApproval` (UUID PK, `mcp_approvals` table) validated by `MCPService` for consequential/unknown tools | Allow-list alone is NOT sufficient for consequential/unknown tools; both checks are additive and sequential (F3/F6 correction). `MCPApproval` is DISTINCT from workflow `ApprovalRequest`. |
+| MCP tool call | (1) Tool in `MCPServerConfig.allowed_tools` AND (2) `MCPApproval` (UUID PK, `mcp_approvals` table) validated by `MCPService` for consequential/unknown tools AND (3) `workflow_run_id` binding verified against server-side trusted context (`trusted_workflow_run_id: int | None` — single parameter, C1; WorkflowRun.id is INTEGER PK, T1; resolved from server-side session only, never from tool arguments or client-supplied fields) AND (4) atomic consumption via `BEGIN IMMEDIATE` single-transaction UPDATE (C2/S2/T2; all binding fields verified in-transaction; SQLite write serialization is a database-engine guarantee, not an SQLAlchemy connection-pool guarantee) | Allow-list alone is NOT sufficient for consequential/unknown tools; all checks are additive and sequential (F3/F6/S1/S2/T1/T2/C1/C2). `MCPApproval` is DISTINCT from workflow `ApprovalRequest`. `trusted_workflow_run_id` comes from server-side session only; it is `int | None`. |
 | Live adapter call | `GitHubConfirmation` record or approved `ApprovalRequest` | Credential presence is authentication only, not authorization |
 | Any credential in log | Blocked by `RedactSecretsProcessor` | Applies to all log records |
 | Auto PR merge | Not supported (no endpoint) | Permanent exclusion |
