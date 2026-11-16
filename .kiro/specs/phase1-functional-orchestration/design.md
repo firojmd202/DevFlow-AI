@@ -1,11 +1,11 @@
 # DevFlow AI — Phase 1: Functional Orchestration Design
 
-**Version:** 1.5.3
+**Version:** 1.5.4
 **Status:** Corrected — Final PR Readiness Reviewed
 **Scope:** Phase 1 — Functional Orchestration
 **Branch:** feature/phase1-specification-planning
 **Base commit:** aaaaacb703124fc31b0e757b2bf1739c4fb225c9
-**Last Updated:** 2026-11-15
+**Last Updated:** 2026-11-16
 **Supersedes:** v1.3.0 (F1–F3 corrections applied — see .agents/tasks/phase1-v1.4.0-correction-report.md)
 
 **Version history:**
@@ -18,6 +18,8 @@
 - v1.5.1 — MCP Security Hardening Pass (S1–S2): S1 workflow_run_id binding rules added to §7.5 (invoke_tool signature, 6 binding rules, trusted_workflow_run_id server-side parameter); S2 atomic consumption contract strengthened in §7.5 and MCPApprovalRepository (8-step transaction sequence, SQLite concurrency assumptions, datetime.now(UTC) enforcement); mcp_approval_rejected audit event with reason field added to §7.5 and §16; 9 new named negative tests added to §7.5. Branch: feature/phase1-specification-planning.
 - v1.5.2 — 2026-11-15 — Type and Concurrency Alignment Pass (T1–T2): T1 trusted_workflow_run_id type corrected UUID → int | None throughout §7.5 (invoke_tool signature, consume_atomic signature, MCPApproval model notes); T2 SQLite concurrency model clarified: removed incorrect "SQLAlchemy connection pooling serializes writes" claim; added BEGIN IMMEDIATE transaction semantics, busy_timeout policy, and retry rules to §7.5 consume_atomic; 5 new T2 named negative tests added. Branch: feature/phase1-specification-planning.
 - v1.5.3 — 2026-11-15 — Final PR Readiness Gate (C1–C2): C1 redundant workflow_run_id parameter removed from invoke_tool; only trusted_workflow_run_id: int | None remains; added explicit §7.5 statement that trusted_workflow_run_id is resolved from server-side session context and never from tool arguments or client-supplied fields. C2 consume_atomic signature extended with all binding fields (actor_id, mcp_server_id, tool_name, arguments_hash) as explicit parameters; in-transaction verification of all bindings documented with 8-step algorithm; test_approval_modified_between_validation_and_consumption added to Wave 4 I4 and I7. Branch: feature/phase1-specification-planning.
+
+- v1.5.4 — 2026-11-16 — Wave 3 Response Contract Correction (W3-RC): resolved the REQ-W1.5.4 ↔ §11.3 conflict reported in docs/reports/phase1-wave3-codex-report.md. §11.3 WorkflowRunResponse now carries `approvals: list[ApprovalResponse]` (every associated ApprovalRequest — all statuses — ordered by `created_at` ascending) AND `pending_approvals: list[ApprovalResponse]` (pending-only subset, backward compatibility); both default to `[]` (never null); read-only projection, no approval-lifecycle change. Added `ApprovalRepository.list_for_run(run_id)` to §4.3 (read-only data source; no migration). Added ADR-0013. Traceability matrix: REQ-W1.5 → §10.2, §9, §11.3. See requirements REQ-W1.5.4a–c; tasks A1, A5. Branch: feature/phase1-wave3-integration-execution.
 
 ---
 
@@ -477,6 +479,11 @@ class WorkflowRunRepository(BaseRepository[WorkflowRun]):
 ```python
 class ApprovalRepository(BaseRepository[ApprovalRequest]):
     async def list_pending(self) -> list[ApprovalRequest]: ...
+    async def list_for_run(self, run_id: int) -> list[ApprovalRequest]:
+        # All ApprovalRequest rows for run_id (every status: pending, approved,
+        # rejected, expired), ordered by created_at ascending (ties by id).
+        # Read-only: does not mutate approval state. Returns [] when the run
+        # has no approvals. Feeds WorkflowRunResponse.approvals (§11.3, W3-RC).
     async def resolve(
         self,
         approval_id: int,
@@ -1309,12 +1316,20 @@ class WorkflowRunResponse(BaseModel):
     started_at: datetime | None
     completed_at: datetime | None
     error_message: str | None
+    approvals: list[ApprovalResponse] = []
     pending_approvals: list[ApprovalResponse] = []
     created_at: datetime
     updated_at: datetime
 
     model_config = ConfigDict(from_attributes=True)
 ```
+
+**Approval projection contract (W3-RC; resolves REQ-W1.5.4 ↔ §11.3):**
+- `approvals` — every `ApprovalRequest` associated with the run, regardless of status (`pending`, `approved`, `rejected`, `expired`), ordered by `created_at` ascending (ties broken by `id`). Returned by `GET /api/v1/workflow-runs/{run_id}` and the run-list endpoints.
+- `pending_approvals` — the subset of `approvals` whose `status == "pending"`, in the same order. This is a backward-compatibility convenience filter; it MUST equal `[a for a in approvals if a.status == "pending"]`.
+- When the run has no associated approvals, BOTH fields serialise as an empty array `[]`, never `null` (the `= []` default enforces this at the schema layer).
+- This is a read-only projection. Building the response does not mutate `ApprovalRequest.status`, `resolved_at`, or `resolved_by`, does not reopen or restore resolved/expired approvals, and writes no audit log entry. The approval lifecycle (REQ-W1.6, §5.2) and the `approval_requests` schema are unchanged, so no migration is required.
+- Data source: the response is assembled in the service/router layer (following the existing `ProjectService` pattern) from the `WorkflowRun` (fetched by id via `WorkflowRunRepository.get`) plus approvals from `ApprovalRepository.list_for_run(run_id)` (§4.3). `pending_approvals` is derived in that same layer by filtering the fetched list; no second query is required.
 
 ### 11.4 ApprovalResponse
 
@@ -1718,6 +1733,11 @@ MCP_SERVERS_CONFIG: str = ""   # Already present in Phase 0; validator added in 
 **Rationale:** SQLite silently ignores FK constraints unless this PRAGMA is set per connection. All `ON DELETE CASCADE` and `ON DELETE SET NULL` semantics in migrations 003–005 depend on it. The event-handler pattern is already in use for WAL mode; reusing it for FK enforcement is consistent and requires no other changes.
 **Alternatives considered:** Setting it only in `alembic/env.py` — rejected (doesn't apply to runtime application connections). Database-level trigger — not supported in SQLite migrations portably.
 
+### ADR-0013: WorkflowRunResponse exposes all approvals plus a pending-only filter
+**Decision:** `WorkflowRunResponse` (§11.3) carries two approval fields: `approvals` (every associated `ApprovalRequest`, all statuses) and `pending_approvals` (the pending-only subset). Both default to `[]`.
+**Rationale:** REQ-W1.5.4 requires the run-detail response to include "any associated `ApprovalRequest` records" — all of them, including resolved and expired ones. The original §11.3 schema exposed only `pending_approvals`, which hid resolved approvals after resolution and contradicted the requirement. Adding `approvals` satisfies the requirement; keeping `pending_approvals` preserves the existing pending-focused contract for any consumer that relied on it. Both fields are read-only projections of `ApprovalRequest` rows; the approval lifecycle (REQ-W1.6, §5.2) and the `approval_requests` schema are unchanged, so no migration is required.
+**Alternatives considered:** Replace `pending_approvals` with `approvals` only — rejected (removes an existing specced field, a breaking change, and loses the pending-filter convenience). Add a query parameter to toggle scope — rejected (the requirement asks for the records to be present, not optionally filtered). Exclude expired approvals from `approvals` — rejected (REQ-W1.5.4 says "any associated" with no status exclusion; expired approvals are part of the history).
+
 ---
 
 ## 19. Requirements-to-Design-to-Tasks Traceability Matrix
@@ -1734,7 +1754,7 @@ MCP_SERVERS_CONFIG: str = ""   # Already present in Phase 0; validator added in 
 | REQ-W1.2 | WorkflowRun model + 6 states (no paused) | §3.3, §9 | W1, W6 |
 | REQ-W1.3 | ApprovalRequest model | §3.4 | W1, W6 |
 | REQ-W1.4 | Workflow CRUD endpoints | §10.2 | A1, A5 |
-| REQ-W1.5 | WorkflowRun create + manage; no autonomous exec | §10.2, §9 | W3, W5, A1, A5 |
+| REQ-W1.5 | WorkflowRun create + manage; run-detail exposes all approvals (W3-RC) | §10.2, §9, §11.3 | W3, W5, A1, A5 |
 | REQ-W1.6 | Approval resolve endpoints | §10.3, §5.2 | W4, W5, A2, A5 |
 | REQ-W1.7 | WorkflowAuditLog + 6 event types | §3.5, §16 | W1, W4, W5, W6 |
 | REQ-I1.1 | GitHubAdapter live | §8.1, §6 | I2, I5, I7 |

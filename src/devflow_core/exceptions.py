@@ -9,6 +9,30 @@ class ConfigurationError(DevFlowError):
     """Configuration cannot be used by the application."""
 
 
+class PausedWorkflowError(ValueError):
+    """A paused workflow cannot create a run."""
+
+
+class ConfirmationRequiredError(DevFlowError):
+    """A protected action requires explicit confirmation."""
+
+
+class ConfirmationExpiredError(DevFlowError):
+    """A confirmation expired."""
+
+
+class ConfirmationMismatchError(DevFlowError):
+    """A confirmation does not match the operation."""
+
+
+class ConfirmationAlreadyUsedError(DevFlowError):
+    """A confirmation was already used."""
+
+
+class ConfirmationNotFoundError(DevFlowError):
+    """A confirmation could not be found."""
+
+
 class InvalidStatusTransitionError(DevFlowError):
     def __init__(self, run_id: int, from_status: str, to_status: str) -> None:
         self.run_id = run_id

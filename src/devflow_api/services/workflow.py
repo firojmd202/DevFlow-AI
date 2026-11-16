@@ -4,7 +4,7 @@ from devflow_api.models.workflow import WorkflowRun
 from devflow_api.repositories.approval import AuditLogRepository
 from devflow_api.repositories.workflow import WorkflowRepository, WorkflowRunRepository
 from devflow_api.services._transaction import shared_session, transaction
-from devflow_core.exceptions import InvalidStatusTransitionError
+from devflow_core.exceptions import InvalidStatusTransitionError, PausedWorkflowError
 
 WORKFLOW_TRANSITIONS = {
     "pending": {"running"},
@@ -30,7 +30,7 @@ class WorkflowService:
             if status is None:
                 raise LookupError(f"Workflow {workflow_id} does not exist")
             if status == "paused":
-                raise ValueError("A paused workflow cannot start a new run")
+                raise PausedWorkflowError("A paused workflow cannot start a new run")
             run = await self._run_repo.create({"workflow_id": workflow_id}, commit=False)
             await self._audit_repo.log_event("run_created", "system", run.id, commit=False)
         return run

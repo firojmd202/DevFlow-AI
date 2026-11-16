@@ -14,8 +14,8 @@ PAGES = (
     ("Learning", "Learning plans and progress"),
     ("Specifications", "Specification authoring"),
     ("Design", "Design workflows"),
-    ("Coding", "Coding and execution"),
-    ("Testing", "Testing and quality checks"),
+    ("Workflows", ""),
+    ("History", ""),
     ("Documentation", "Documentation and knowledge"),
     ("Integrations", "Integration workflows"),
     ("Settings", "Application settings"),
@@ -24,7 +24,7 @@ PAGES = (
 
 @pytest.mark.parametrize(
     ("index", "heading", "feature"),
-    [(index, *page) for index, page in enumerate(PAGES, 1) if index != 2],
+    [(index, *page) for index, page in enumerate(PAGES, 1) if index not in {1, 2, 6, 7}],
 )
 def test_page_renders_without_exception(index: int, heading: str, feature: str) -> None:
     at = AppTest.from_file(UI / "pages" / f"{index}_{heading}.py").run()
@@ -35,15 +35,19 @@ def test_page_renders_without_exception(index: int, heading: str, feature: str) 
     assert not at.metric
 
 
-def test_dashboard_has_no_fabricated_metrics() -> None:
+def test_dashboard_has_no_fabricated_metrics(monkeypatch: pytest.MonkeyPatch) -> None:
+    for method in ("list_projects", "list_workflows", "list_approvals"):
+        monkeypatch.setattr(APIClient, method, AsyncMock(return_value=None))
     at = AppTest.from_file(UI / "pages/1_Dashboard.py").run()
     assert not at.exception
-    assert not at.metric and not at.dataframe
+    assert [metric.value for metric in at.metric] == ["—", "—", "—"]
+    assert not at.dataframe
     assert not at.get("vega_lite_chart") and not at.get("plotly_chart")
 
 
 def test_navigation(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(APIClient, "list_projects", AsyncMock(return_value=[]))
+    for method in ("list_projects", "list_workflows", "list_approvals"):
+        monkeypatch.setattr(APIClient, method, AsyncMock(return_value=[]))
     source = ast.parse((UI / "app.py").read_text(encoding="utf-8"))
     calls = [
         node.func.attr
