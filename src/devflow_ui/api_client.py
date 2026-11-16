@@ -148,6 +148,14 @@ class APIClient:
     async def list_integrations(self) -> list[dict[str, object]] | None:
         return await self._list("/integrations")
 
+    async def list_repositories(
+        self, project_id: int | None = None
+    ) -> list[dict[str, object]] | None:
+        params: dict[str, str | int] | None = (
+            None if project_id is None else {"project_id": project_id}
+        )
+        return await self._list("/repositories", params)
+
     async def get_integration_health(self, name: str) -> dict[str, object] | None:
         from urllib.parse import quote
 

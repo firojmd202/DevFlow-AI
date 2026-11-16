@@ -45,6 +45,8 @@ markers = ["integration: marks tests requiring external resources (skipped in CI
 
 [tool.coverage.run]
 branch = true
+# Async SQLAlchemy switches into greenlets while handling database operations.
+concurrency = ["greenlet", "thread"]
 source = ["src"]
 omit = ["*/tests/*", "*/__init__.py"]
 

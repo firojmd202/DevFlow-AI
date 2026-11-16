@@ -15,7 +15,10 @@ from devflow_api.routers.health import router as health_router
 from devflow_api.routers.integrations import router as integrations_router
 from devflow_api.routers.learning import router as learning_router
 from devflow_api.routers.projects import router as projects_router
+from devflow_api.routers.repositories import github_outcome_error
+from devflow_api.routers.repositories import router as repositories_router
 from devflow_api.routers.workflows import router as workflows_router
+from devflow_api.services.repository import GitHubOutcomeError
 from devflow_core.config import Settings, get_settings
 from devflow_core.logging import configure_logging
 from devflow_core.mcp_config import MCPServerConfig
@@ -37,6 +40,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
     app.add_middleware(RequestLoggingMiddleware)
     add_error_handlers(app)
+    app.add_exception_handler(GitHubOutcomeError, github_outcome_error)
+    app.state.settings = config
     app_registry = AdapterRegistry()
     for name in registry.list_names():
         app_registry.register(registry.get(name))
@@ -54,6 +59,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(integrations_router)
     app.include_router(workflows_router)
     app.include_router(approvals_router)
+    app.include_router(repositories_router)
     return app
 
 

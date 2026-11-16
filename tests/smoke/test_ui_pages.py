@@ -103,6 +103,9 @@ def test_settings_page_renders(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         APIClient, "list_integrations", AsyncMock(return_value=[{"name": "github", "mode": "live"}])
     )
+    monkeypatch.setattr(
+        APIClient, "get_integration_health", AsyncMock(return_value={"status": "ok"})
+    )
     at = AppTest.from_file(UI / "pages/10_Settings.py").run()
     assert not at.exception
     assert [element.value for element in at.text] == [
@@ -110,6 +113,31 @@ def test_settings_page_renders(monkeypatch: pytest.MonkeyPatch) -> None:
         "MCP servers configured: 0",
         "GitHub: connected",
     ]
+
+
+@pytest.mark.parametrize(
+    ("mode", "health", "label"),
+    [
+        ("stub", None, "no token configured"),
+        ("live", {"status": "ok"}, "connected"),
+        ("live", {"status": "unavailable"}, "unavailable"),
+        ("live", None, "unavailable"),
+    ],
+)
+def test_settings_page_github_status(
+    monkeypatch: pytest.MonkeyPatch, mode: str, health: dict[str, str] | None, label: str
+) -> None:
+    monkeypatch.setattr(
+        APIClient, "list_integrations", AsyncMock(return_value=[{"name": "github", "mode": mode}])
+    )
+    get_health = AsyncMock(return_value=health)
+    monkeypatch.setattr(APIClient, "get_integration_health", get_health)
+    at = AppTest.from_file(UI / "pages/10_Settings.py").run()
+    assert not at.exception and at.text[-1].value == f"GitHub: {label}"
+    if mode == "live":
+        get_health.assert_awaited_once_with("github")
+    else:
+        get_health.assert_not_awaited()
 
 
 @pytest.mark.parametrize("available", [True, False])
