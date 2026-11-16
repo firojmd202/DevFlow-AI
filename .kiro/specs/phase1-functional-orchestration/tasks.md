@@ -1,10 +1,10 @@
 # DevFlow AI — Phase 1: Implementation Tasks
 
-**Version:** 1.5.7
-**Status:** Corrected — Wave 4 PENDING Approval Lifecycle Correction
+**Version:** 1.5.8
+**Status:** Corrected — Wave 5 GitHub Orchestration Security Specification
 **Scope:** Phase 1 — Functional Orchestration
-**Branch:** feature/phase1-wave4-integration-execution
-**Base commit:** 756100d1166c64b001da4a044ad22513197ab408
+**Branch:** feature/phase1-wave5-github-orchestration
+**Base commit:** bceb9bab4328fe4ca5ed068a25fa9f541841f0ff
 **Last Updated:** 2026-11-16
 **Supersedes:** v1.3.0 (F1–F3 corrections applied — see .agents/tasks/phase1-v1.4.0-correction-report.md)
 
@@ -23,6 +23,7 @@
 - v1.5.5 — 2026-11-16 — Wave 4 Specification Conflict Resolution (W4-CR): resolved four Wave 4 conflicts reported in docs/reports/phase1-wave4-spec-resolution.md. Conflict A (MCP transport): Task I4 key implementation notes corrected — `MCPClient` launches the configured server via an explicit-environment subprocess (`asyncio.create_subprocess_exec(..., env=resolved_env)`) feeding SDK `ClientSession`; SDK `stdio_client` dropped (merges parent env; no 5 s grace control); 4 new named subprocess tests added to I4 and I7. Conflict B (approval binding): migration 006 SQL and `MCPApproval` model FK changed from `ON DELETE SET NULL` to `ON DELETE RESTRICT`; 5 new named deletion/binding tests added to I4 and I7. Conflict C (live adapter capability metadata): Task I3/I7 acceptance criteria clarified — live adapters return `IntegrationCapability(available_in_phase_0=False)` (immutable Phase 0 schema `Literal[False]`). Conflict D (page numbering): Task I7 confirmed — Wave 4 updates existing `9_Integrations.py` and `10_Settings.py` (Replace/Extend); no new Integrations/Settings pages created. Branch: feature/phase1-wave4-integration-execution.
 - v1.5.6 — 2026-11-16 — Wave 4 Final FK Contract Correction (W4-FK): resolved the v1.5.5 RESTRICT contradiction. SQLite's `ON DELETE RESTRICT` is unconditional — it blocks deletion whenever ANY referencing `mcp_approvals` row exists, regardless of approval status — so the v1.5.5 acceptance criteria (CONSUMED/PENDING/REJECTED/EXPIRED approvals permit deletion) were unimplementable. Task I4 migration 006 SQL and `MCPApproval` model FK changed from `ON DELETE RESTRICT` back to `ON DELETE SET NULL`, combined with a database-enforced BEFORE DELETE trigger on `workflow_runs` (`trg_workflow_runs_before_delete_expire_approved_mcp_approvals`) created in migration 006 `upgrade()` (and dropped in `downgrade()`); the trigger sets `status='EXPIRED'` on every APPROVED MCPApproval referencing the run BEFORE the FK clears the reference. Verified against real SQLite foreign-key enforcement (SQLite library 3.49.1, 17/17 checks pass). The W4 deletion/binding named-test set in I4 and I7 updated: 1 renamed (`test_workflow_run_deletion_blocked_with_approved_mcp_approval` → `test_workflow_run_deletion_expires_approved_mcp_approval`, behavior changed from block to expire), 4 kept (rationale updated), 4 added (`test_workflow_run_deletion_preserves_consumed_approval`, `test_workflow_run_deletion_preserves_rejected_approval`, `test_expired_approval_after_deletion_cannot_be_consumed`, `test_trigger_rollback_restores_approval`). See docs/reports/phase1-wave4-fk-final-resolution.md. Branch: feature/phase1-wave4-integration-execution.
 - v1.5.7 — 2026-11-16 — Wave 4 PENDING Approval Lifecycle Correction (W4-PA): resolved the remaining MCP authorization lifecycle gap. Task I4 migration 006 trigger DDL updated: `AND status = 'APPROVED'` → `AND status IN ('PENDING', 'APPROVED')` and trigger renamed `trg_workflow_runs_before_delete_expire_mcp_approvals`; `downgrade()` drop updated to match. W4-FK deletion/binding test set updated in I4 named tests and I7 all-tests list: `test_workflow_run_deletion_allowed_with_pending_approval` renamed to `test_workflow_run_deletion_expires_pending_mcp_approval` (behavior changed from preserve to expire); `test_cascaded_deletion_handles_mcp_approvals` updated (PENDING also expires on cascade); `test_trigger_rollback_restores_approval` updated (restores both PENDING and APPROVED). Added: `test_orphaned_pending_approval_cannot_be_promoted`. Total W4-FK+PA deletion/binding tests: 10. See docs/reports/phase1-wave4-pending-approval-resolution.md. Branch: feature/phase1-wave4-integration-execution.
+- v1.5.8 — 2026-11-16 — Wave 5 GitHub Orchestration Security Specification (W5-GC): Task G1 migration 007 DDL updated — `status TEXT NOT NULL DEFAULT 'ISSUED' CHECK (status IN ('ISSUED','EXPIRED','USED'))` column added to `github_confirmations` table; BEFORE DELETE trigger `trg_workflow_runs_before_delete_expire_github_confirmations` added to `upgrade()` and `DROP TRIGGER IF EXISTS` added to `downgrade()`; `consume_atomic` updated to use `WHERE status='ISSUED'`; G1 acceptance criteria updated to cover status field. Task G5 named tests updated: 10 new W5-GC security negative tests added (`test_boolean_flag_alone_insufficient_for_github_action`, `test_expired_github_confirmation_rejected`, `test_used_github_confirmation_rejected_on_replay`, `test_mismatched_operation_rejected`, `test_mismatched_parameters_hash_rejected`, `test_mismatched_repo_rejected`, `test_concurrent_consumption_only_one_succeeds`, `test_no_automatic_pr_merge`, `test_github_token_not_in_audit_log`, `test_workflow_run_deletion_expires_github_confirmation`). Wave 5 completion gate updated to require the trigger and status column in migration 007 and all 10 W5-GC security negative tests passing. Version bumped, branch updated. Branch: feature/phase1-wave5-github-orchestration.
 
 ---
 
@@ -1194,13 +1195,29 @@ def upgrade() -> None:
         sa.Column("issued_at", sa.DateTime(), nullable=False),
         sa.Column("expires_at", sa.DateTime(), nullable=False),
         sa.Column("used_at", sa.DateTime(), nullable=True),
+        sa.Column("status", sa.Text(), server_default="ISSUED", nullable=False),
         sa.CheckConstraint("operation IN ('branch_create', 'pr_create')", name="ck_github_confirmations_operation"),
+        sa.CheckConstraint("status IN ('ISSUED','EXPIRED','USED')", name="ck_github_confirmations_status"),
         sa.PrimaryKeyConstraint("id"),
     )
     op.create_index("idx_github_confirmations_expires", "github_confirmations", ["expires_at"])
     op.create_index("idx_github_confirmations_actor", "github_confirmations", ["actor_id"])
+    # W5-GC: BEFORE DELETE trigger expires ISSUED GitHubConfirmations before the
+    # ON DELETE SET NULL FK action clears the reference. This prevents a formerly-bound
+    # ISSUED confirmation from becoming a valid unbound (NULL→NULL) authorization after
+    # run deletion. See design §3.7b and §8.2.
+    op.execute("""
+CREATE TRIGGER trg_workflow_runs_before_delete_expire_github_confirmations
+BEFORE DELETE ON workflow_runs
+FOR EACH ROW
+BEGIN
+    UPDATE github_confirmations SET status = 'EXPIRED'
+    WHERE workflow_run_id = OLD.id AND status = 'ISSUED';
+END;
+""")
 
 def downgrade() -> None:
+    op.execute("DROP TRIGGER IF EXISTS trg_workflow_runs_before_delete_expire_github_confirmations")
     op.drop_index("idx_github_confirmations_actor", table_name="github_confirmations")
     op.drop_index("idx_github_confirmations_expires", table_name="github_confirmations")
     op.drop_table("github_confirmations")
@@ -1214,11 +1231,13 @@ def downgrade() -> None:
 3. `RepositoryConfigRepository.get_by_coords(project_id, owner, repo)` returns the matching config.
 4. Creating a duplicate `(project_id, owner, repo)` raises a SQLAlchemy `IntegrityError`.
 5. `GitHubConfirmation` model importable from `devflow_api.models.github_confirmation`.
-6. `GitHubConfirmationRepository.consume_atomic` atomically sets `used_at` and returns the updated record; raises `ConfirmationAlreadyUsedError` if already used.
-7. `alembic upgrade head` from `006_add_mcp_approvals` applies migration 007 without error.
-8. `alembic downgrade -1` from `007` removes `github_confirmations` table without error.
-9. Migration 007 file has `revision = "007_add_github_confirmations"` and `down_revision = "006_add_mcp_approvals"` exactly.
-10. `mypy --strict src/devflow_api/models/repository.py src/devflow_api/models/github_confirmation.py src/devflow_api/repositories/repository_config.py src/devflow_api/repositories/github_confirmation.py` exits with code 0.
+6. `GitHubConfirmation` model includes `status: Mapped[str]` with `server_default="ISSUED"` and a `CheckConstraint` enforcing `status IN ('ISSUED','EXPIRED','USED')`.
+7. `GitHubConfirmationRepository.consume_atomic` atomically sets `used_at`, transitions `status→USED`, and returns the updated record; raises `ConfirmationAlreadyUsedError` if `status != 'ISSUED'` (0 rows updated — covers both already-USED and EXPIRED-by-trigger).
+8. `alembic upgrade head` from `006_add_mcp_approvals` applies migration 007 without error.
+9. `alembic downgrade -1` from `007` removes `github_confirmations` table and drops trigger `trg_workflow_runs_before_delete_expire_github_confirmations` without error.
+10. Migration 007 file has `revision = "007_add_github_confirmations"` and `down_revision = "006_add_mcp_approvals"` exactly.
+11. Migration 007 `upgrade()` creates the BEFORE DELETE trigger `trg_workflow_runs_before_delete_expire_github_confirmations` on `workflow_runs` that sets `status='EXPIRED'` on ISSUED confirmations referencing the deleted run; `downgrade()` drops it.
+12. `mypy --strict src/devflow_api/models/repository.py src/devflow_api/models/github_confirmation.py src/devflow_api/repositories/repository_config.py src/devflow_api/repositories/github_confirmation.py` exits with code 0.
 
 **Definition of Done:** Files committed; all criteria verified in G5 tests.
 
@@ -1359,6 +1378,18 @@ Write all Wave 5 tests and run full CI verification to confirm Phase 1 completio
 - `test_mcp_approval_model_importable` — MCPApproval importable from devflow_api.models.mcp_approval (F6)
 - `test_mcp_approval_consume_atomic_safe` — concurrent consume_atomic calls: exactly one success, one ConsumedError (F6)
 
+**W5-GC security negative tests (all 10 MUST be present — from REQ-G1.4.15–G1.4.24):**
+- `test_boolean_flag_alone_insufficient_for_github_action` — POST body with `{"confirmed": true}` without `confirmation_id` returns HTTP 422 (REQ-G1.4.15)
+- `test_expired_github_confirmation_rejected` — `expires_at` in the past; HTTP 422, code `CONFIRMATION_EXPIRED` (REQ-G1.4.16)
+- `test_used_github_confirmation_rejected_on_replay` — re-submitting a `used_at`-set confirmation returns HTTP 409 (REQ-G1.4.17)
+- `test_mismatched_operation_rejected` — confirmation with `operation='branch_create'` submitted for PR creation; HTTP 422 (REQ-G1.4.18)
+- `test_mismatched_parameters_hash_rejected` — confirmation's `parameters_hash` does not match; HTTP 422 (REQ-G1.4.19)
+- `test_mismatched_repo_rejected` — `repo_full_name` in request differs from stored confirmation; HTTP 422 (REQ-G1.4.20)
+- `test_concurrent_consumption_only_one_succeeds` — two concurrent consume calls, exactly one succeeds and one raises `ConfirmationAlreadyUsedError` via `consume_atomic WHERE status='ISSUED'` (REQ-G1.4.21)
+- `test_no_automatic_pr_merge` — no `/merge` route exists in the OpenAPI spec (REQ-G1.4.22; equivalent to `test_no_merge_endpoint_exists`)
+- `test_github_token_not_in_audit_log` — GITHUB_TOKEN value does not appear in any audit log entry (REQ-G1.4.23)
+- `test_workflow_run_deletion_expires_github_confirmation` — deleting a workflow run with a bound ISSUED confirmation sets the confirmation's `status` to `EXPIRED` via the BEFORE DELETE trigger; the confirmation cannot then be consumed via `consume_atomic WHERE status='ISSUED'` (REQ-G1.4.24)
+
 **Final verification commands (record output in commit message):**
 ```
 pytest -v --cov=src --cov-branch --cov-fail-under=80 --cov-report=term-missing
@@ -1377,5 +1408,7 @@ ruff check .
 8. All six GitHubConfirmation named tests pass: `test_github_confirmation_persisted_to_db`, `test_confirmation_expires_after_ttl`, `test_replay_rejected_after_use`, `test_parameter_mismatch_rejected`, `test_concurrent_consumption_safe`, `test_recovery_after_github_api_failure`. (F2 correction)
 9. `test_github_confirmation_not_restored_after_api_failure` passes (F9 correction).
 10. `test_mcp_approval_consume_atomic_safe` passes (F6 correction).
+11. All 10 W5-GC security negative tests pass (REQ-G1.4.15–G1.4.24): `test_boolean_flag_alone_insufficient_for_github_action`, `test_expired_github_confirmation_rejected`, `test_used_github_confirmation_rejected_on_replay`, `test_mismatched_operation_rejected`, `test_mismatched_parameters_hash_rejected`, `test_mismatched_repo_rejected`, `test_concurrent_consumption_only_one_succeeds`, `test_no_automatic_pr_merge`, `test_github_token_not_in_audit_log`, `test_workflow_run_deletion_expires_github_confirmation`. (W5-GC)
+12. Migration 007 `upgrade()` includes `status TEXT NOT NULL DEFAULT 'ISSUED' CHECK (status IN ('ISSUED','EXPIRED','USED'))` column and the BEFORE DELETE trigger `trg_workflow_runs_before_delete_expire_github_confirmations`; `downgrade()` drops the trigger. (W5-GC)
 
 **Definition of Done:** All files committed; all criteria verified; full verification output recorded in commit message.

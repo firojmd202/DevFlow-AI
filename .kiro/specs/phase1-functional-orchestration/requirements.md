@@ -1,10 +1,10 @@
 # DevFlow AI — Phase 1: Functional Orchestration Requirements
 
-**Version:** 1.5.7
-**Status:** Corrected — Wave 4 PENDING Approval Lifecycle Correction
+**Version:** 1.5.8
+**Status:** Corrected — Wave 5 GitHub Orchestration Security Specification
 **Scope:** Phase 1 — Functional Orchestration
-**Branch:** feature/phase1-wave4-integration-execution
-**Base commit:** 756100d1166c64b001da4a044ad22513197ab408
+**Branch:** feature/phase1-wave5-github-orchestration
+**Base commit:** bceb9bab4328fe4ca5ed068a25fa9f541841f0ff
 **Last Updated:** 2026-11-16
 **Supersedes:** v1.3.0 (F1–F3 corrections applied — see .agents/tasks/phase1-v1.4.0-correction-report.md)
 
@@ -22,6 +22,7 @@
 - v1.5.5 — 2026-11-16 — Wave 4 Specification Conflict Resolution (W4-CR): resolved four Wave 4 conflicts reported in docs/reports/phase1-wave4-spec-resolution.md. Conflict A (MCP transport): REQ-M1.2 transport corrected — `MCPClient` launches the configured server via an explicit-environment subprocess (`asyncio.create_subprocess_exec(..., env=resolved_env)`) feeding the MCP Python SDK `ClientSession`; the SDK `stdio_client` is no longer required because it merges the parent environment (`get_default_environment()`) into the supplied dict and exposes no 5 s termination grace; required system env vars (PATH, SYSTEMROOT, WINDIR, etc.) are explicitly added to `resolved_env` (REQ-M1.5, REQ-S1.5). Conflict B (approval binding): `mcp_approvals.workflow_run_id` FK changed from `ON DELETE SET NULL` to `ON DELETE RESTRICT` (REQ-M2.1 M2.1.3) so an APPROVED approval bound to a deleted run cannot become a valid unbound (NULL) authorization via NULL-to-NULL context match; 5 new named deletion/binding tests added; deletion-invariant note added to REQ-M1.7. Conflict C (live adapter capability metadata): design §6.2 corrected — live adapters return `IntegrationCapability(available_in_phase_0=False)`; the Phase 0 schema is immutable `Literal[False]`, so `available_in_phase_0=True` is impossible (pydantic ValidationError); live/stub distinction expressed via `execution_mode`, the `mode` field (Task I6), and `stub=False`. Conflict D (page numbering): confirmed Wave 4 updates existing `9_Integrations.py` and `10_Settings.py` (REQ-I1.6, REQ-U1.5); no new Integrations/Settings pages created. Branch: feature/phase1-wave4-integration-execution.
 - v1.5.6 — 2026-11-16 — Wave 4 Final FK Contract Correction (W4-FK): resolved the v1.5.5 RESTRICT contradiction. SQLite's `ON DELETE RESTRICT` is unconditional — it blocks deletion whenever ANY referencing `mcp_approvals` row exists, regardless of approval status — so the v1.5.5 acceptance criteria (CONSUMED/PENDING/REJECTED/EXPIRED approvals permit deletion) were unimplementable. `mcp_approvals.workflow_run_id` FK changed from `ON DELETE RESTRICT` back to `ON DELETE SET NULL`, combined with a database-enforced BEFORE DELETE trigger on `workflow_runs` (`trg_workflow_runs_before_delete_expire_approved_mcp_approvals`) that sets `status='EXPIRED'` on every APPROVED MCPApproval referencing the run BEFORE the FK clears the reference. The trigger runs in the same transaction as the DELETE, so ROLLBACK restores the approval. Verified against real SQLite foreign-key enforcement (SQLite library 3.49.1): APPROVED→EXPIRED; CONSUMED/PENDING/REJECTED/EXPIRED preserved with FK cleared to NULL; originally-unbound approvals unaffected; the EXPIRED approval cannot be consumed (`consume_atomic` 0 rows); cascaded deletion (workflow delete → run cascade) expires APPROVED; project delete does not reach runs. The deletion/binding test set updated: 1 renamed (`test_workflow_run_deletion_blocked_with_approved_mcp_approval` → `test_workflow_run_deletion_expires_approved_mcp_approval`, behavior changed from block to expire), 4 kept (rationale updated), 4 added (`test_workflow_run_deletion_preserves_consumed_approval`, `test_workflow_run_deletion_preserves_rejected_approval`, `test_expired_approval_after_deletion_cannot_be_consumed`, `test_trigger_rollback_restores_approval`). See docs/reports/phase1-wave4-fk-final-resolution.md. Branch: feature/phase1-wave4-integration-execution.
 - v1.5.7 — 2026-11-16 — Wave 4 PENDING Approval Lifecycle Correction (W4-PA): resolved the remaining MCP authorization lifecycle gap. A PENDING MCPApproval bound to workflow run X survived deletion of X with `status='PENDING'` and `workflow_run_id=NULL`, indistinguishable from an originally-unbound PENDING approval; a future resolve operation could promote it to APPROVED, authorizing an unbound invocation. Fix: REQ-M2.1 trigger description updated — BEFORE DELETE trigger now expires `status IN ('PENDING','APPROVED')` (renamed `trg_workflow_runs_before_delete_expire_mcp_approvals`; W4-PA); M2.1.3 updated with new trigger name and PENDING coverage; M2.1.7 updated: PENDING→EXPIRED on run deletion is now explicit; M2.1.9 updated: PENDING→EXPIRED (not preserved); deletion lifecycle table updated: PENDING→EXPIRED. Named deletion/binding tests updated: `test_workflow_run_deletion_allowed_with_pending_approval` renamed to `test_workflow_run_deletion_expires_pending_mcp_approval`; `test_cascaded_deletion_handles_mcp_approvals` updated (PENDING also expires on cascade); `test_trigger_rollback_restores_approval` updated (restores both PENDING and APPROVED). Added: `test_orphaned_pending_approval_cannot_be_promoted`. Approval resolution rejects non-PENDING status: an EXPIRED approval (whether by TTL or run-deletion trigger) cannot be resolved or promoted to APPROVED. Verified with real SQLite: 23/23 assertions pass. See docs/reports/phase1-wave4-pending-approval-resolution.md. Branch: feature/phase1-wave4-integration-execution.
+- v1.5.8 — 2026-11-16 — Wave 5 GitHub Orchestration Security Specification (W5-GC): added GitHubConfirmation status field (ISSUED/EXPIRED/USED), BEFORE DELETE trigger on workflow_runs for github_confirmations, complete confirmation security contract (REQ-G1.4), execution outcome definitions (SUCCEEDED/FAILED/INDETERMINATE), and all required negative and named tests. Status field closes the NULL-to-NULL bypass risk for GitHubConfirmations (same pattern as MCPApproval in W4-PA). Migration 007 DDL updated to include status column, CHECK constraint, and trigger. All 10 security contract negative tests added to REQ-G1.4 and G5. Execution outcomes added to REQ-M2.4 scope (GitHub). Version bumped, branch updated. Branch: feature/phase1-wave5-github-orchestration.
 
 ---
 
@@ -253,6 +254,8 @@ THEN a `WorkflowAuditLog` SQLAlchemy model MUST exist in `src/devflow_api/models
 | `github_action_authorized` | `RepositoryService` validates a `GitHubConfirmation` before action | `"user"` |
 | `github_action_executed` | `RepositoryService` completes branch/PR creation | `"user"` |
 | `github_action_rejected` | `RepositoryService` rejects an invalid/expired/used confirmation | `"user"` |
+| `github_action_failed` | GitHub API call result was FAILED or INDETERMINATE after confirmation consumption | `"user"` |
+| `github_confirmation_expired` | BEFORE DELETE trigger expired an ISSUED `GitHubConfirmation` on `workflow_runs` deletion | `"system"` |
 | `mcp_approval_requested` | `MCPService` before calling a consequential/unknown tool | `"system"` |
 | `mcp_approval_granted` | Approval resolved as approved for an MCP tool call | `"user"` |
 | `mcp_approval_denied` | Approval explicitly rejected by a human approver for an MCP tool call (NOT expiry — expiry emits `mcp_approval_expired`) | `"user"` |
@@ -270,7 +273,7 @@ W1.7.3 — Every `WorkflowRun` status transition generates an audit log entry wi
 W1.7.4 — Calling `ApprovalService.request_approval` generates an audit log entry with `event_type = "approval_requested"`.
 W1.7.5 — Resolving an `ApprovalRequest` generates an audit log entry with `event_type = "approval_resolved"`.
 W1.7.6 — `GET /api/v1/workflow-runs/{run_id}/audit` returns the full audit log for a run, ordered by `created_at` ascending.
-W1.7.7 — Issuing a `GitHubConfirmation` logs `github_confirmation_issued`; executing the action logs `github_action_authorized` and `github_action_executed`; rejecting a confirmation logs `github_action_rejected`.
+W1.7.7 — Issuing a `GitHubConfirmation` logs `github_confirmation_issued`; executing the action logs `github_action_authorized` and `github_action_executed`; rejecting a confirmation logs `github_action_rejected`; a FAILED or INDETERMINATE GitHub API outcome logs `github_action_failed`; expiry of an ISSUED confirmation via the BEFORE DELETE trigger logs `github_confirmation_expired`.
 W1.7.8 — MCP service operations log the eight MCP audit events defined in REQ-M1.7 (`mcp_approval_requested`, `mcp_approval_granted`, `mcp_approval_denied`, `mcp_approval_expired`, `mcp_approval_missing`, `mcp_tool_invoked`, `mcp_tool_completed`, `mcp_tool_failed`). `mcp_approval_denied` MUST NOT be emitted on expiry; `mcp_approval_expired` MUST be emitted instead. `mcp_tool_completed` is DISTINCT from `mcp_tool_invoked`.
 
 ---
@@ -726,6 +729,51 @@ THEN `POST /api/v1/repositories/{repo_config_id}/branches` MUST support creating
 
 **Authorization model:** The `GitHubConfirmation` record is explicit user acknowledgement of the specific action with the specific parameters. Having a `GITHUB_TOKEN` credential in Settings is an authentication prerequisite, not authorization. The credential allows the GitHub API call to authenticate; the confirmation record is the authorization gate. Never treat a client-supplied boolean as sufficient authorization.
 
+**GitHubConfirmation status field (W5-GC):** The `github_confirmations` table MUST have a `status TEXT NOT NULL DEFAULT 'ISSUED' CHECK (status IN ('ISSUED','EXPIRED','USED'))` column. The three status values are:
+- `ISSUED` — confirmation created; not yet consumed or expired.
+- `EXPIRED` — set by the BEFORE DELETE trigger on `workflow_runs` when the bound run is deleted and the confirmation has `status='ISSUED'`. An EXPIRED confirmation cannot be consumed.
+- `USED` — set atomically by `consume_atomic` on first use.
+
+This prevents the NULL-to-NULL bypass: if a workflow run is deleted, its ISSUED confirmations become EXPIRED before `workflow_run_id` is cleared to NULL, so they cannot match a future invocation with `trusted_workflow_run_id=None`.
+
+**BEFORE DELETE trigger on workflow_runs for github_confirmations (W5-GC):** Migration 007 MUST create:
+```sql
+CREATE TRIGGER trg_workflow_runs_before_delete_expire_github_confirmations
+BEFORE DELETE ON workflow_runs
+FOR EACH ROW
+BEGIN
+    UPDATE github_confirmations SET status = 'EXPIRED'
+    WHERE workflow_run_id = OLD.id AND status = 'ISSUED';
+END;
+```
+USED confirmations are not changed by the trigger (audit history preserved). Originally-unbound confirmations (`workflow_run_id IS NULL` at creation) are unaffected.
+
+**GitHub execution outcomes (W5-GC):** Every `branch_create` and `pr_create` GitHub API call has one of three outcomes:
+- `SUCCEEDED` — GitHub API returned 2xx; operation confirmed.
+- `FAILED` — GitHub API returned 4xx/5xx; operation definitively failed.
+- `INDETERMINATE` — timeout, network error, or ambiguous response; operation may or may not have been executed.
+
+Rules:
+1. Confirmation MUST be consumed (status→USED, `used_at` set) BEFORE the GitHub API call.
+2. After INDETERMINATE: record `github_action_failed` audit event with `reason=INDETERMINATE`; do NOT auto-retry; do NOT restore the confirmation.
+3. After FAILED: same — confirmation stays USED, new confirmation required for retry.
+4. 'DevFlow AI cannot guarantee exactly-once execution of external GitHub operations. If the API call result is unknown, the user must verify GitHub state before issuing a new confirmation.'
+
+**Complete security contract (REQ-G1.4 — W5-GC):**
+1. Actor identity: `actor_id` comes from server-side session context, never from request body.
+2. Repository access: GitHub token must be present and the target repo accessible before issuing a confirmation.
+3. Canonical parameters hash: SHA-256 of canonical JSON of operation parameters (`repo_full_name`, `branch_name` or PR `title/body/base`).
+4. Exact operation binding: `confirmation.operation` MUST exactly match the requested operation.
+5. Trusted workflow-run binding: `workflow_run_id: int | None` from server-side session; same NULL-to-NULL rules as MCPApproval. The status field (ISSUED/EXPIRED/USED) prevents a formerly-bound ISSUED confirmation from becoming a valid unbound authorization after run deletion.
+6. Expiration: configurable TTL default 10 minutes; `expires_at` checked inside `consume_atomic`.
+7. SQLite `BEGIN IMMEDIATE` consumption: single transaction with SELECT then conditional `UPDATE WHERE status='ISSUED' AND expires_at > now`.
+8. `rowcount == 1` required: if 0 rows updated, raise `ConfirmationAlreadyUsedError` (concurrent or expired).
+9. Single-use: `used_at` set, `status→USED`, never reset after FAILED/INDETERMINATE execution.
+10. Credential safety: GitHub token never logged; audit events reference `repo_full_name`, not token.
+11. Audit events: `github_confirmation_issued`, `github_action_authorized`, `github_action_executed`, `github_action_failed`, `github_action_rejected`, `github_confirmation_expired`.
+12. No boolean-only authorization: a `GitHubConfirmation` DB record (`status=ISSUED`) is required.
+13. No automatic merging: PR creation is the only allowed operation; merge operations are out of scope.
+
 **Acceptance Criteria:**
 G1.4.1 — `POST /api/v1/repositories/{repo_config_id}/branches` with a valid, unexpired, unused `confirmation_id` creates the branch via GitHub API and returns HTTP 201.
 G1.4.2 — The same request without `confirmation_id` or with `confirmed: true` (boolean) alone returns HTTP 422 with code `CONFIRMATION_REQUIRED`.
@@ -739,8 +787,20 @@ G1.4.9 — `test_github_confirmation_persisted_to_db` — verifies a `GitHubConf
 G1.4.10 — `test_confirmation_expires_after_ttl` — verifies an expired confirmation (expires_at in the past) returns HTTP 422 with code `CONFIRMATION_EXPIRED`.
 G1.4.11 — `test_replay_rejected_after_use` — verifies re-submitting a used `confirmation_id` returns HTTP 409.
 G1.4.12 — `test_parameter_mismatch_rejected` — verifies a confirmation with a different `parameters_hash` returns HTTP 422 with code `CONFIRMATION_MISMATCH`.
-G1.4.13 — `test_concurrent_consumption_safe` — verifies that two concurrent requests with the same valid `confirmation_id` result in exactly one success and one HTTP 409 (double-consumption prevention).
+G1.4.13 — `test_concurrent_consumption_safe` — verifies that two concurrent requests with the same valid `confirmation_id` result in exactly one success and one HTTP 409 (double-consumption prevention via `consume_atomic WHERE status='ISSUED'`).
 G1.4.14 — `test_recovery_after_github_api_failure` — verifies that if the GitHub API call fails after `used_at` is set, the system does not silently lose the confirmation record and reports the failure correctly.
+
+**Additional security-negative tests (all MUST be present — W5-GC):**
+G1.4.15 — `test_boolean_flag_alone_insufficient_for_github_action` — POST body with `{"confirmed": true}` without `confirmation_id` returns HTTP 422.
+G1.4.16 — `test_expired_github_confirmation_rejected` — `expires_at` in the past; HTTP 422, code `CONFIRMATION_EXPIRED`.
+G1.4.17 — `test_used_github_confirmation_rejected_on_replay` — re-submitting a `used_at`-set confirmation returns HTTP 409.
+G1.4.18 — `test_mismatched_operation_rejected` — confirmation with `operation='branch_create'` submitted for PR creation; HTTP 422.
+G1.4.19 — `test_mismatched_parameters_hash_rejected` — confirmation's `parameters_hash` does not match; HTTP 422.
+G1.4.20 — `test_mismatched_repo_rejected` — `repo_full_name` in request differs from stored confirmation; HTTP 422.
+G1.4.21 — `test_concurrent_consumption_only_one_succeeds` — two concurrent consume calls, exactly one succeeds and one raises `ConfirmationAlreadyUsedError`.
+G1.4.22 — `test_no_automatic_pr_merge` — no `/merge` route exists in the OpenAPI spec.
+G1.4.23 — `test_github_token_not_in_audit_log` — GITHUB_TOKEN value does not appear in any audit log entry.
+G1.4.24 — `test_workflow_run_deletion_expires_github_confirmation` — deleting a workflow run with a bound ISSUED confirmation sets the confirmation's `status` to `EXPIRED` via the BEFORE DELETE trigger; the confirmation cannot then be consumed.
 
 ### REQ-G1.5
 WHEN a PR is created,
