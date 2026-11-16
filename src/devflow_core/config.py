@@ -3,8 +3,10 @@
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import Field, SecretStr
+from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from devflow_core.mcp_config import parse_mcp_config
 
 
 class Settings(BaseSettings):
@@ -37,7 +39,19 @@ class Settings(BaseSettings):
     GITHUB_TOKEN: SecretStr | None = None
     FIGMA_TOKEN: SecretStr | None = None
     OLLAMA_BASE_URL: str = "http://localhost:11434"
+    OLLAMA_TIMEOUT_SECONDS: int = Field(default=30, gt=0)
+    GITHUB_API_BASE_URL: str = "https://api.github.com"
+    FIGMA_API_BASE_URL: str = "https://api.figma.com"
     MCP_SERVERS_CONFIG: str = ""
+
+    @field_validator("MCP_SERVERS_CONFIG")
+    @classmethod
+    def validate_mcp_config(cls, value: str) -> str:
+        try:
+            parse_mcp_config(value)
+        except ValueError:
+            raise ValueError("Invalid MCP server configuration") from None
+        return value
 
 
 @lru_cache(maxsize=1)

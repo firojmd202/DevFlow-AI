@@ -35,7 +35,7 @@ def test_alembic_upgrade_downgrade_roundtrip(
     command.check(configuration)
     with closing(sqlite3.connect(sqlite_path)) as connection:
         assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == (
-            "005_add_repository_tables",
+            "006_add_mcp_approvals",
         )
         assert connection.execute("PRAGMA journal_mode").fetchone() == ("wal",)
     sqlite_path.unlink()
@@ -117,6 +117,7 @@ def test_migration_003_004_005_round_trip(
         ).fetchone() == ("main", 1)
         connection.execute("DELETE FROM projects WHERE id=1")
         assert connection.execute("SELECT count(*) FROM repository_configs").fetchone() == (0,)
+    command.upgrade(config, "head")
     command.check(config)
     command.downgrade(config, "base")
     assert not (TABLES | set().union(*steps.values())) & tables(sqlite_path)

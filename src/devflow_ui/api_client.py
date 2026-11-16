@@ -145,6 +145,14 @@ class APIClient:
     async def get_approval(self, approval_id: int) -> dict[str, object] | None:
         return await self._record("GET", f"/approvals/{approval_id}")
 
+    async def list_integrations(self) -> list[dict[str, object]] | None:
+        return await self._list("/integrations")
+
+    async def get_integration_health(self, name: str) -> dict[str, object] | None:
+        from urllib.parse import quote
+
+        return await self._record("GET", f"/integrations/{quote(name, safe='')}/health")
+
     async def resolve_approval(
         self, approval_id: int, decision: str, resolved_by: str | None = None
     ) -> dict[str, object] | None:
