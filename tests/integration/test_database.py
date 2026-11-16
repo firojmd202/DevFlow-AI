@@ -35,7 +35,7 @@ def test_alembic_upgrade_downgrade_roundtrip(
     command.check(configuration)
     with closing(sqlite3.connect(sqlite_path)) as connection:
         assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == (
-            "002_add_project_tags_column",
+            "005_add_repository_tables",
         )
         assert connection.execute("PRAGMA journal_mode").fetchone() == ("wal",)
     sqlite_path.unlink()
@@ -74,3 +74,49 @@ def test_migration_002_upgrade_downgrade(
     assert TABLES <= tables(sqlite_path)
     command.downgrade(config, "base")
     assert not TABLES & tables(sqlite_path)
+
+
+@pytest.mark.integration
+def test_migration_003_004_005_round_trip(
+    sqlite_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("DATABASE_URL", f"sqlite+aiosqlite:///{sqlite_path.as_posix()}")
+    get_settings.cache_clear()
+    config = Config(str(ROOT / "alembic.ini"))
+    command.upgrade(config, "002_add_project_tags_column")
+    with closing(sqlite3.connect(sqlite_path)) as connection, connection:
+        connection.execute(
+            "INSERT INTO projects (name, tags_json, created_at, updated_at) "
+            "VALUES ('Existing', '[]', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+        )
+    steps = {
+        "003_add_workflow_tables": {"workflows", "workflow_runs"},
+        "004_add_approval_audit_tables": {"approval_requests", "workflow_audit_log"},
+        "005_add_repository_tables": {"repository_configs"},
+    }
+    for revision, added in steps.items():
+        command.upgrade(config, revision)
+        assert added <= tables(sqlite_path)
+        command.downgrade(config, "-1")
+        assert not added & tables(sqlite_path)
+        command.upgrade(config, revision)
+        assert added <= tables(sqlite_path)
+
+    with closing(sqlite3.connect(sqlite_path)) as connection, connection:
+        assert connection.execute("SELECT name, tags_json FROM projects").fetchone() == (
+            "Existing",
+            "[]",
+        )
+        connection.execute("PRAGMA foreign_keys=ON")
+        connection.execute(
+            "INSERT INTO repository_configs (project_id, owner, repo, created_at, updated_at) "
+            "VALUES (1, 'owner', 'repo', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+        )
+        assert connection.execute(
+            "SELECT default_branch, is_active FROM repository_configs"
+        ).fetchone() == ("main", 1)
+        connection.execute("DELETE FROM projects WHERE id=1")
+        assert connection.execute("SELECT count(*) FROM repository_configs").fetchone() == (0,)
+    command.check(config)
+    command.downgrade(config, "base")
+    assert not (TABLES | set().union(*steps.values())) & tables(sqlite_path)

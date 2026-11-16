@@ -23,15 +23,22 @@ class BaseRepository[ModelT: Base]:
         return await self.session.get(self.model, id)
 
     async def list(self, offset: int = 0, limit: int = 50) -> list[ModelT]:
-        return list(
-            (await self.session.scalars(select(self.model).offset(offset).limit(limit))).all()
+        query = (
+            select(self.model)
+            .order_by(*self.model.__table__.primary_key)
+            .offset(offset)
+            .limit(limit)
         )
+        return list((await self.session.scalars(query)).all())
 
-    async def create(self, obj_in: dict[str, object]) -> ModelT:
+    async def create(self, obj_in: dict[str, object], *, commit: bool = True) -> ModelT:
         row = self.model(**obj_in)
         self.session.add(row)
-        await self._commit()
-        await self.session.refresh(row)
+        if commit:
+            await self._commit()
+            await self.session.refresh(row)
+        else:
+            await self.session.flush()
         return row
 
     async def update(self, id: int, obj_in: dict[str, object]) -> ModelT | None:
