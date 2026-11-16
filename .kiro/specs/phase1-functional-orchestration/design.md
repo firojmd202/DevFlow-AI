@@ -1,10 +1,10 @@
 # DevFlow AI — Phase 1: Functional Orchestration Design
 
-**Version:** 1.5.4
-**Status:** Corrected — Final PR Readiness Reviewed
+**Version:** 1.5.7
+**Status:** Corrected — Wave 4 PENDING Approval Lifecycle Correction
 **Scope:** Phase 1 — Functional Orchestration
-**Branch:** feature/phase1-specification-planning
-**Base commit:** aaaaacb703124fc31b0e757b2bf1739c4fb225c9
+**Branch:** feature/phase1-wave4-integration-execution
+**Base commit:** 756100d1166c64b001da4a044ad22513197ab408
 **Last Updated:** 2026-11-16
 **Supersedes:** v1.3.0 (F1–F3 corrections applied — see .agents/tasks/phase1-v1.4.0-correction-report.md)
 
@@ -20,6 +20,9 @@
 - v1.5.3 — 2026-11-15 — Final PR Readiness Gate (C1–C2): C1 redundant workflow_run_id parameter removed from invoke_tool; only trusted_workflow_run_id: int | None remains; added explicit §7.5 statement that trusted_workflow_run_id is resolved from server-side session context and never from tool arguments or client-supplied fields. C2 consume_atomic signature extended with all binding fields (actor_id, mcp_server_id, tool_name, arguments_hash) as explicit parameters; in-transaction verification of all bindings documented with 8-step algorithm; test_approval_modified_between_validation_and_consumption added to Wave 4 I4 and I7. Branch: feature/phase1-specification-planning.
 
 - v1.5.4 — 2026-11-16 — Wave 3 Response Contract Correction (W3-RC): resolved the REQ-W1.5.4 ↔ §11.3 conflict reported in docs/reports/phase1-wave3-codex-report.md. §11.3 WorkflowRunResponse now carries `approvals: list[ApprovalResponse]` (every associated ApprovalRequest — all statuses — ordered by `created_at` ascending) AND `pending_approvals: list[ApprovalResponse]` (pending-only subset, backward compatibility); both default to `[]` (never null); read-only projection, no approval-lifecycle change. Added `ApprovalRepository.list_for_run(run_id)` to §4.3 (read-only data source; no migration). Added ADR-0013. Traceability matrix: REQ-W1.5 → §10.2, §9, §11.3. See requirements REQ-W1.5.4a–c; tasks A1, A5. Branch: feature/phase1-wave3-integration-execution.
+- v1.5.5 — 2026-11-16 — Wave 4 Specification Conflict Resolution (W4-CR): resolved four Wave 4 conflicts reported in docs/reports/phase1-wave4-spec-resolution.md. Conflict A (MCP transport): §7.2 `MCPClient.call_tool` transport corrected — `MCPClient` launches the configured server via an explicit-environment subprocess (`asyncio.create_subprocess_exec(..., env=resolved_env)`) feeding the MCP Python SDK `ClientSession`; SDK `stdio_client` dropped because it merges `get_default_environment()` into the supplied env (breaking isolation) and exposes no 5 s termination grace; required system env vars explicitly added to `resolved_env`; §7.6 offline-testing note updated. Conflict B (approval binding): §3.7a `mcp_approvals.workflow_run_id` FK changed from `ON DELETE SET NULL` to `ON DELETE RESTRICT`; §3.7 FK table and §7.5 model notes updated so an APPROVED approval bound to a deleted run cannot become a valid unbound (NULL) authorization. Conflict C (live adapter capability metadata): §6.2 corrected — live adapters return `IntegrationCapability(available_in_phase_0=False)` (the Phase 0 schema is immutable `Literal[False]`; `available_in_phase_0=True` is impossible); live/stub distinction via `execution_mode`, `mode`, and `stub=False`. Conflict D (page numbering): §12.1 confirmed — Wave 4 updates existing `9_Integrations.py` and `10_Settings.py`; no new Integrations/Settings pages created. Branch: feature/phase1-wave4-integration-execution.
+- v1.5.6 — 2026-11-16 — Wave 4 Final FK Contract Correction (W4-FK): resolved the v1.5.5 RESTRICT contradiction. SQLite's `ON DELETE RESTRICT` is unconditional — it blocks deletion whenever ANY referencing `mcp_approvals` row exists, regardless of approval status — so the v1.5.5 acceptance criteria (CONSUMED/PENDING/REJECTED/EXPIRED approvals permit deletion) were unimplementable. §3.7a `mcp_approvals.workflow_run_id` FK changed from `ON DELETE RESTRICT` back to `ON DELETE SET NULL`, combined with a database-enforced BEFORE DELETE trigger on `workflow_runs` (`trg_workflow_runs_before_delete_expire_approved_mcp_approvals`) that sets `status='EXPIRED'` on every APPROVED MCPApproval referencing the run BEFORE the FK clears the reference; §3.7a SQL DDL + model, §3.7 FK behaviors table, §3.7 deletion-invariant note + security rationale, and §7.5 model notes + EXPIRED-rejection note updated. Verified against real SQLite foreign-key enforcement (SQLite library 3.49.1, 17/17 checks pass): the BEFORE DELETE trigger fires before the FK SET NULL action (APPROVED→EXPIRED, not left APPROVED-with-NULL-FK); CONSUMED/PENDING/REJECTED/EXPIRED preserved with FK cleared to NULL; originally-unbound approvals unaffected; the EXPIRED approval cannot be consumed (`consume_atomic` 0 rows); cascaded deletion (workflow delete → run cascade) expires APPROVED with default SQLite settings (no `recursive_triggers` PRAGMA required); project delete does not reach runs; ROLLBACK restores the approval. The deletion/binding test set updated: 1 renamed, 4 kept (rationale updated), 4 added. See docs/reports/phase1-wave4-fk-final-resolution.md. Branch: feature/phase1-wave4-integration-execution.
+- v1.5.7 — 2026-11-16 — Wave 4 PENDING Approval Lifecycle Correction (W4-PA): resolved the remaining MCP authorization lifecycle gap. A PENDING MCPApproval bound to workflow run X survived deletion of X with `status='PENDING'` and `workflow_run_id=NULL`, indistinguishable from an originally-unbound PENDING approval; a future resolve operation could promote it to APPROVED, authorizing an unbound invocation. Fix: §3.7a BEFORE DELETE trigger updated from `status='APPROVED'` to `status IN ('PENDING','APPROVED')` and renamed `trg_workflow_runs_before_delete_expire_mcp_approvals` (W4-PA); §3.7 FK behaviors table and §3.7 deletion-invariant + security rationale notes updated to cover PENDING; §3.7a MCPApproval model comment updated. Valid-status-transitions list gains `PENDING → EXPIRED` (run-deletion path, distinct from TTL). Run-deletion trigger note extended: approval-resolution flow MUST only resolve approvals whose status is PENDING; an EXPIRED approval cannot be resolved or promoted. Verified with real SQLite: 23/23 assertions pass (direct deletion, cascade, promotion prevention, rollback, unbound unaffected, consume_atomic rejection). See docs/reports/phase1-wave4-pending-approval-resolution.md. Branch: feature/phase1-wave4-integration-execution.
 
 ---
 
@@ -275,6 +278,22 @@ CREATE TABLE mcp_approvals (
 CREATE INDEX idx_mcp_approvals_server ON mcp_approvals(mcp_server_id);
 CREATE INDEX idx_mcp_approvals_status ON mcp_approvals(status);
 CREATE INDEX idx_mcp_approvals_expires ON mcp_approvals(expires_at);
+
+-- W4-PA: BEFORE DELETE trigger expires BOTH PENDING and APPROVED MCP approvals
+-- before the ON DELETE SET NULL FK action clears the reference. Expiring
+-- PENDING prevents an orphaned PENDING approval (FK cleared to NULL) from being
+-- later promoted to APPROVED and authorizing an unbound invocation. See §3.7
+-- for the deletion-invariant note and the security rationale. This trigger is
+-- created by migration 006 (Task I4) and must exist wherever mcp_approvals does.
+CREATE TRIGGER trg_workflow_runs_before_delete_expire_mcp_approvals
+BEFORE DELETE ON workflow_runs
+FOR EACH ROW
+BEGIN
+    UPDATE mcp_approvals
+       SET status = 'EXPIRED'
+     WHERE workflow_run_id = OLD.id
+       AND status IN ('PENDING', 'APPROVED');
+END;
 ```
 
 **Required revision header:**
@@ -297,6 +316,12 @@ class MCPApproval(Base):
     actor_id: Mapped[str] = mapped_column(Text, nullable=False)
     workflow_run_id: Mapped[int | None] = mapped_column(
         Integer, ForeignKey("workflow_runs.id", ondelete="SET NULL"), nullable=True
+        # SET NULL + BEFORE DELETE trigger (W4-PA): a PENDING or APPROVED MCPApproval
+        # bound to a run is expired (status -> EXPIRED) by the trigger BEFORE the FK
+        # clears the reference, so it cannot become a valid unbound (NULL)
+        # authorization after run deletion, and an orphaned PENDING approval cannot
+        # be later promoted to APPROVED (it is already EXPIRED, and the resolution
+        # flow only resolves PENDING approvals).
     )
     status: Mapped[str] = mapped_column(
         Text, nullable=False, server_default="PENDING"
@@ -313,6 +338,8 @@ class MCPApproval(Base):
 - `APPROVED` → `CONSUMED` (atomic consumption via `consume_atomic` before tool execution)
 - `PENDING` → `EXPIRED` (TTL elapsed before resolution)
 - `APPROVED` → `EXPIRED` (TTL elapsed before consumption)
+
+**Run-deletion trigger (W4-PA):** a `PENDING` or `APPROVED` `MCPApproval` originally bound to a deleted `workflow_run` is set to `EXPIRED` by the BEFORE DELETE trigger (§3.7a) BEFORE the `ON DELETE SET NULL` action clears `workflow_run_id` to NULL. This is a distinct path to `EXPIRED` from TTL expiry, and it is database-enforced (a direct SQL `DELETE FROM workflow_runs` cannot bypass it). An approval resolution flow MUST only resolve approvals whose status is `PENDING`; an `EXPIRED` approval (whether by TTL or by the run-deletion trigger) cannot be resolved or promoted to `APPROVED`.
 
 ---
 
@@ -431,8 +458,13 @@ The three workflow-domain FK relationships and their delete behaviors are:
 | `Workflow.project_id` | `projects.id` | **SET NULL** | Deleting a Project sets `Workflow.project_id` to NULL; the Workflow record is NOT deleted. |
 | `WorkflowRun.workflow_id` | `workflows.id` | **CASCADE** | Deleting a Workflow deletes all its WorkflowRun records. |
 | `WorkflowAuditLog.workflow_run_id` | `workflow_runs.id` | **SET NULL** | Deleting a WorkflowRun sets `WorkflowAuditLog.workflow_run_id` to NULL; audit log entries are NOT deleted. |
+| `MCPApproval.workflow_run_id` | `workflow_runs.id` | **SET NULL** (W4-PA) | Deleting a WorkflowRun first fires a BEFORE DELETE trigger (`trg_workflow_runs_before_delete_expire_mcp_approvals`) that sets `status='EXPIRED'` on every PENDING and APPROVED `MCPApproval` referencing the run, then the FK action clears `workflow_run_id` to NULL for all referencing rows. A PENDING or APPROVED approval cannot become a valid unbound (NULL) authorization: it is EXPIRED (rejected by `consume_atomic`, and not promotable by the resolution flow, which only resolves PENDING) before the binding is cleared. |
 
 **Note:** Deleting a Project does NOT cascade to WorkflowRun records. The chain is: Project deleted → Workflow.project_id set NULL (Workflow remains) → no further cascade. WorkflowRun records are only deleted when their parent Workflow is deleted.
+
+**MCPApproval deletion-invariant note (W4-FK, refined by W4-PA):** `MCPApproval.workflow_run_id` uses `ON DELETE SET NULL` combined with a BEFORE DELETE trigger on `workflow_runs` (`trg_workflow_runs_before_delete_expire_mcp_approvals`), NOT `ON DELETE RESTRICT`. SQLite's `RESTRICT` is unconditional — it blocks deletion whenever any referencing row exists, regardless of approval status — so it could not satisfy the requirement that CONSUMED/REJECTED/EXPIRED approvals permit deletion. The trigger invalidates PENDING and APPROVED MCP approvals before the FK SET NULL action clears the reference. This prevents a PENDING or APPROVED approval from becoming a valid unbound (NULL→NULL) authorization after run deletion: the approval is set to `status='EXPIRED'` (rejected by `consume_atomic`'s `status='APPROVED'` check) before `workflow_run_id` becomes NULL. Expiring PENDING (not just APPROVED) closes the additional gap that a PENDING approval, once orphaned by a run deletion, could otherwise be indistinguishable from an originally-unbound PENDING approval and later promoted to APPROVED — the trigger sets it to `EXPIRED` first, and the approval-resolution flow only resolves approvals whose status is `PENDING`, so an `EXPIRED` approval cannot be promoted. The `ON DELETE SET NULL` action requires `PRAGMA foreign_keys=ON` (REQ-DB1.3); the trigger is a plain SQL DDL trigger that fires on any DELETE of a `workflow_runs` row (direct or cascaded — verified to fire under SQLite's default settings without `PRAGMA recursive_triggers`). Originally-unbound approvals (`workflow_run_id IS NULL` at creation) are unaffected (the trigger only updates rows `WHERE workflow_run_id = OLD.id`) and keep REQ-M2.5 NULL-to-NULL semantics. CONSUMED/REJECTED/EXPIRED approvals are untouched by the trigger and have their `workflow_run_id` cleared to NULL (history preserved). The trigger runs in the same transaction as the DELETE, so a rolled-back run deletion restores PENDING and APPROVED approvals to their original status with their original binding intact.
+
+**Security rationale (W4-FK, refined by W4-PA):** the BEFORE DELETE trigger on `workflow_runs` invalidates PENDING and APPROVED MCP approvals before the FK SET NULL action clears the reference. This prevents an APPROVED approval from becoming a valid unbound (NULL→NULL) authorization after run deletion, and prevents an orphaned PENDING approval from being later promoted to APPROVED and authorizing an unbound invocation. An EXPIRED approval cannot be resolved or promoted — the approval resolution flow rejects any approval whose status is not PENDING.
 
 **Note on `alembic/env.py`:** The existing `alembic/env.py` already registers a `'connect'` event for `PRAGMA journal_mode=WAL`. During implementation, `PRAGMA foreign_keys=ON` must also be added to that same handler in `alembic/env.py`. The `alembic/env.py` file is out of scope for this specification-correction step and will be updated by the implementer alongside `src/devflow_api/database.py`.
 
@@ -653,7 +685,7 @@ Each live adapter:
 - Accepts a `Settings` instance in `__init__`
 - Implements the same `Protocol` as its stub counterpart
 - Sets `stub=False` in all response objects
-- Has no `ClassVar` capability — capability is a `@property` returning `IntegrationCapability(available_in_phase_0=True)`
+- Exposes `capability` as a `@property` returning an `IntegrationCapability` populated for the live integration. Per W4-CR Conflict C, `available_in_phase_0` MUST be `False` — the `IntegrationCapability` schema (`src/devflow_api/adapters/capability.py`) declares `available_in_phase_0: Literal[False]`, so `True` is impossible (pydantic `ValidationError`) and the Phase 0 schema is immutable and out of scope to modify. The live/stub distinction is expressed through `execution_mode` (`ExecutionMode.AUTOMATED_API` for live adapters), the per-response `stub=False` flag, and the `mode: Literal["live","stub"]` field on `IntegrationSummary` (Task I6). Live adapters populate `supported_actions`, `auth_required`, and `auth_type` from the live integration's real capabilities (e.g. `auth_required=True`, `auth_type="bearer"` for GitHub/Figma; `auth_required=False` for Ollama).
 
 ---
 
@@ -696,11 +728,36 @@ class MCPClient:
            Note: allowed_tools is a configuration-time permission control, not human approval.
         3. Interpolate env secrets (raises MCPSecretResolutionError if unresolvable).
            Only SecretStr Settings fields may be interpolated.
-        4. Launch subprocess via MCP SDK stdio_client with explicit env (not inheriting parent).
-        5. Call tool with timeout_seconds.
-        6. On completion/timeout: terminate subprocess (SIGTERM, then SIGKILL after 5s grace)
-           in finally block.
-        7. Log invocation (keys only, not values).
+        4. Compose resolved_env:
+              a. Start from interpolated MCPServerConfig.env.
+              b. Explicitly add system vars required for child startup, by name from parent:
+                 Windows: PATH, SYSTEMROOT, WINDIR, TEMP, TMP, PATHEXT, COMSPEC
+                 POSIX:   PATH, HOME, LANG, LC_ALL, TMPDIR
+              c. No other parent variables copied; no parent secrets inherited.
+           W4-CR Conflict A: DO NOT use sdk.stdio_client or get_default_environment()
+           — they merge the full parent env, breaking explicit isolation.
+        5. Launch subprocess via asyncio.create_subprocess_exec(
+               *command, *args,
+               env=resolved_env,
+               stdin=PIPE, stdout=PIPE, stderr=...
+           )  — child receives ONLY resolved_env.
+        6. Wrap subprocess stdio in SDK ClientSession(read_stream, write_stream).
+           ClientSession.initialize() performs tool discovery.
+        7. Call tool with timeout_seconds via ClientSession.call_tool().
+        8. On completion/timeout: in finally block, send SIGTERM → wait 5 s grace
+           → SIGKILL if still alive. Owned by MCPClient, not SDK stdio_client context.
+        9. Log invocation (keys only, not values).
+
+        W4-CR Conflict A — SDK transport decision:
+        The SDK stdio_client helper is NOT used. SDK v1.x stdio_client calls
+        get_default_environment() and merges the result into the supplied env dict,
+        causing the child to inherit parent-process variables (PATH, USERPROFILE, etc.)
+        that must NOT be inherited for explicit environment isolation (REQ-M1.5, REQ-S1.5).
+        Additionally, stdio_client uses a fixed asyncio.Event-based cleanup with no
+        configurable grace period, making the SIGTERM → 5 s → SIGKILL sequence
+        impossible to implement via its context manager API.
+        ClientSession is the SDK interface used here; subprocess ownership and cleanup
+        remain entirely within MCPClient.
         """
 ```
 
@@ -865,7 +922,7 @@ class MCPService:
 #   tool_name       — TEXT (must match the tool being invoked)
 #   arguments_hash  — TEXT (SHA-256 of canonical JSON of arguments; must match)
 #   actor_id        — TEXT (must match actor_id in the invoke_tool call)
-#   workflow_run_id — INTEGER | None (nullable FK → workflow_runs.id ON DELETE SET NULL)
+#   workflow_run_id — INTEGER | None (nullable FK → workflow_runs.id ON DELETE SET NULL — W4-FK: a BEFORE DELETE trigger on workflow_runs expires (status -> EXPIRED) every APPROVED approval referencing the run before the FK clears the reference, so an APPROVED approval bound to a deleted run can NOT become a valid unbound NULL authorization)
 #   status          — TEXT CHECK IN ('PENDING','APPROVED','REJECTED','EXPIRED','CONSUMED')
 #   requested_at    — DATETIME (UTCDateTime)
 #   resolved_at     — DATETIME | None (UTCDateTime; set when APPROVED or REJECTED)
@@ -931,6 +988,8 @@ class MCPApprovalRepository(BaseRepository[MCPApproval]):
     async def list_pending(self, server_id: str) -> list[MCPApproval]: ...
 ```
 
+**EXPIRED rejection at consume_atomic (W4-FK, refined by W4-PA):** `consume_atomic` rejects any approval whose `status != 'APPROVED'` (in-transaction check 3.e: `status = APPROVED AND expires_at > now AND consumed_at IS NULL`). This existing behavior now also covers approvals expired by the BEFORE DELETE trigger on `workflow_runs` (§3.7a): an approval that was PENDING or APPROVED before its run was deleted has `status = 'EXPIRED'` and `workflow_run_id = NULL`, so even an unbound invocation (`trusted_workflow_run_id = NULL`, which would otherwise match NULL-to-NULL per REQ-M2.5) is rejected at the consumption gate — the `UPDATE ... WHERE status='APPROVED'` matches 0 rows and `consume_atomic` raises `ConsumedError`. The NULL-to-NULL authorization bypass is therefore impossible for an approval that was *originally bound* to the deleted run. An orphaned PENDING approval cannot be promoted to APPROVED either: the trigger already set it to `EXPIRED`, and the approval-resolution flow only resolves approvals whose status is `PENDING`, so a resolution `UPDATE ... WHERE status='PENDING'` matches 0 rows. Originally-unbound approvals (`workflow_run_id IS NULL` at creation) keep their REQ-M2.5 NULL-to-NULL semantics; the trigger never fires for them (it only updates rows `WHERE workflow_run_id = OLD.id`).
+
 **Tool classification:** `MCPServerConfig` gains an optional `tool_classifications: dict[str, Literal["read_only", "consequential", "unknown"]]` field. Any tool not listed defaults to `"unknown"`. Read-only tools may proceed without an `mcp_approval_id`.
 
 **Additive sequential checks (both must pass):**
@@ -991,7 +1050,7 @@ class MCPApprovalRepository(BaseRepository[MCPApproval]):
 3. Run the full test suite including MCP integration tests.
 4. If the MCP SDK introduces behaviour changes visible to callers, update this spec.
 
-**Offline testing:** All MCP unit and integration tests MUST mock the subprocess. No live MCP server is required in CI. The `mcp` SDK's `stdio_client` is not called in tests; only the Python interface is imported for type-checking purposes.
+**Offline testing:** All MCP unit and integration tests MUST mock the subprocess. No live MCP server is required in CI. `asyncio.create_subprocess_exec` (the subprocess launch) and `ClientSession` (the SDK session) are mocked in tests. The SDK `stdio_client` is not imported or called in production code (W4-CR Conflict A — it is not used as the transport); only `ClientSession` is imported for type-checking and mocking purposes.
 
 ---
 
@@ -1368,6 +1427,8 @@ class ApprovalResponse(BaseModel):
 
 **Page numbering note:** Pages 6 and 7 are renamed to reflect their Phase 1 function. The numeric prefix determines navigation order. `app.py` navigation registration is updated to match.
 
+**Wave 4 page-numbering confirmation (W4-CR Conflict D):** Task I7 UPDATEs the EXISTING pages `9_Integrations.py` (placeholder → live integration status) and `10_Settings.py` (health check → extended with integration/MCP/GitHub status) in place. No new Integrations or Settings pages are created, and no pages are renumbered. The canonical Wave 4 page names are `9_Integrations.py` and `10_Settings.py`, matching the actual `src/devflow_ui/pages/` file tree (which contains `3_Learning.py` and `4_Specifications.py`, not `3_Integrations.py`/`4_Settings.py`). `app.py` navigation is unchanged for pages 9 and 10.
+
 ### 12.2 APIClient extension strategy
 
 `APIClient` grows from one method (`get_health`) to a full typed client. Each method follows the Phase 0 contract: returns `None` on any error, logs a warning, never raises.
@@ -1707,9 +1768,9 @@ MCP_SERVERS_CONFIG: str = ""   # Already present in Phase 0; validator added in 
 **Alternatives considered:** Conditional adapter class selection at startup — rejected (harder to test, creates tight coupling to Settings at import time).
 
 ### ADR-0007: MCP servers as subprocesses (stdio transport)
-**Decision:** Use MCP Python SDK's `stdio_client` transport. Each tool call spawns and terminates a fresh process.
-**Rationale:** stdio is the universal MCP transport. Persistent process management (SSE) is deferred to Phase 2 when connection pooling requirements are clearer.
-**Alternatives considered:** SSE transport — deferred. HTTP transport — not universally supported by MCP servers.
+**Decision:** Launch each MCP server as an explicit-environment subprocess via `asyncio.create_subprocess_exec(*command, *args, env=resolved_env, stdin=PIPE, stdout=PIPE, stderr=...)` and wrap the subprocess stdio in the MCP Python SDK `ClientSession` (W4-CR Conflict A). Each tool call spawns a fresh process; `MCPClient` owns the `SIGTERM → 5 s grace → SIGKILL` cleanup in a `finally` block. The SDK `stdio_client` helper is NOT used: SDK v1.x `stdio_client` merges `get_default_environment()` into the supplied env dict (breaking explicit environment isolation) and exposes no configurable termination grace period.
+**Rationale:** stdio is the universal MCP transport. Explicit subprocess ownership preserves the environment-isolation invariant (REQ-M1.5, REQ-S1.5) and the deterministic 5 s termination grace (REQ-M1.2.5), neither of which the SDK `stdio_client` context manager can guarantee. Persistent process management (SSE) is deferred to Phase 2 when connection pooling requirements are clearer.
+**Alternatives considered:** SDK `stdio_client` transport — rejected (parent-env merge; no grace control). SSE transport — deferred. HTTP transport — not universally supported by MCP servers.
 
 ### ADR-0008: Workflow state machine in service layer, not database
 **Decision:** Status transition validation lives in `WorkflowRunRepository.transition_status`, not in a DB trigger or constraint.

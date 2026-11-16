@@ -3,7 +3,11 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from devflow_api.adapters.registry import registry
+from devflow_api.adapters.live.figma import FigmaAdapter
+from devflow_api.adapters.live.github import GitHubAdapter
+from devflow_api.adapters.live.mcp_live import MCPLiveAdapter
+from devflow_api.adapters.live.ollama import OllamaAdapter
+from devflow_api.adapters.registry import AdapterRegistry, registry
 from devflow_api.middleware.error_handler import add_error_handlers
 from devflow_api.middleware.logging import RequestLoggingMiddleware
 from devflow_api.routers.approvals import router as approvals_router
@@ -14,6 +18,7 @@ from devflow_api.routers.projects import router as projects_router
 from devflow_api.routers.workflows import router as workflows_router
 from devflow_core.config import Settings, get_settings
 from devflow_core.logging import configure_logging
+from devflow_core.mcp_config import MCPServerConfig
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -32,7 +37,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
     app.add_middleware(RequestLoggingMiddleware)
     add_error_handlers(app)
-    app.state.adapter_registry = registry
+    app_registry = AdapterRegistry()
+    for name in registry.list_names():
+        app_registry.register(registry.get(name))
+    if config.GITHUB_TOKEN:
+        app_registry.register_live("github", GitHubAdapter(config))
+    if config.FIGMA_TOKEN:
+        app_registry.register_live("figma", FigmaAdapter(config))
+    app_registry.register_live("ollama", OllamaAdapter(config))
+    if any(server.enabled for server in MCPServerConfig.from_settings(config)):
+        app_registry.register_live("mcp", MCPLiveAdapter(config))
+    app.state.adapter_registry = app_registry
     app.include_router(health_router)
     app.include_router(projects_router)
     app.include_router(learning_router)

@@ -24,7 +24,7 @@ PAGES = (
 
 @pytest.mark.parametrize(
     ("index", "heading", "feature"),
-    [(index, *page) for index, page in enumerate(PAGES, 1) if index not in {1, 2, 6, 7}],
+    [(index, *page) for index, page in enumerate(PAGES, 1) if index not in {1, 2, 6, 7, 9, 10}],
 )
 def test_page_renders_without_exception(index: int, heading: str, feature: str) -> None:
     at = AppTest.from_file(UI / "pages" / f"{index}_{heading}.py").run()
@@ -46,7 +46,7 @@ def test_dashboard_has_no_fabricated_metrics(monkeypatch: pytest.MonkeyPatch) ->
 
 
 def test_navigation(monkeypatch: pytest.MonkeyPatch) -> None:
-    for method in ("list_projects", "list_workflows", "list_approvals"):
+    for method in ("list_projects", "list_workflows", "list_approvals", "list_integrations"):
         monkeypatch.setattr(APIClient, method, AsyncMock(return_value=[]))
     source = ast.parse((UI / "app.py").read_text(encoding="utf-8"))
     calls = [
@@ -67,6 +67,7 @@ def test_navigation(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.mark.parametrize("health", [None, {"status": "ok", "version": "0.1.0"}])
 def test_settings_health(monkeypatch: pytest.MonkeyPatch, health: dict[str, str] | None) -> None:
+    monkeypatch.setattr(APIClient, "list_integrations", AsyncMock(return_value=[]))
     get_health = AsyncMock(return_value=health)
     monkeypatch.setattr(APIClient, "get_health", get_health)
     at = AppTest.from_file(UI / "pages/10_Settings.py").run()
@@ -76,7 +77,39 @@ def test_settings_health(monkeypatch: pytest.MonkeyPatch, health: dict[str, str]
     if health is None:
         assert at.warning[0].value == "API unavailable — start the backend to connect."
     else:
-        assert at.text[0].value == "Backend: ok · version 0.1.0"
+        assert at.text[-1].value == "Backend: ok · version 0.1.0"
+
+
+@pytest.mark.parametrize(
+    "state", [None, [], [{"name": "github", "mode": "live", "execution_mode": "automated_api"}]]
+)
+def test_integrations_page_renders(monkeypatch: pytest.MonkeyPatch, state: object) -> None:
+    monkeypatch.setattr(APIClient, "list_integrations", AsyncMock(return_value=state))
+    monkeypatch.setattr(
+        APIClient, "get_integration_health", AsyncMock(return_value={"status": "ok"})
+    )
+    at = AppTest.from_file(UI / "pages/9_Integrations.py").run()
+    assert not at.exception
+    if state:
+        at.button[0].click().run()
+        assert at.markdown[-1].value == "Status: ok"
+    elif state is None:
+        assert at.warning
+    else:
+        assert at.info
+
+
+def test_settings_page_renders(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        APIClient, "list_integrations", AsyncMock(return_value=[{"name": "github", "mode": "live"}])
+    )
+    at = AppTest.from_file(UI / "pages/10_Settings.py").run()
+    assert not at.exception
+    assert [element.value for element in at.text] == [
+        "Integrations: 1 live · 0 stub",
+        "MCP servers configured: 0",
+        "GitHub: connected",
+    ]
 
 
 @pytest.mark.parametrize("available", [True, False])

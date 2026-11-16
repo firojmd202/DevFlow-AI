@@ -18,6 +18,7 @@ from devflow_api.adapters.stubs.stitch import StitchStubAdapter
 class AdapterRegistry:
     def __init__(self) -> None:
         self._adapters: dict[str, BaseAdapterProtocol] = {}
+        self._live: dict[str, BaseAdapterProtocol] = {}
 
     def register(self, adapter: BaseAdapterProtocol) -> None:
         self._adapters[adapter.name] = adapter
@@ -30,6 +31,14 @@ class AdapterRegistry:
 
     def list_names(self) -> list[str]:
         return sorted(self._adapters)
+
+    def register_live(self, name: str, adapter: BaseAdapterProtocol) -> None:
+        self.get(name)
+        self._live[name] = adapter
+
+    def get_live(self, name: str) -> BaseAdapterProtocol:
+        stub = self.get(name)
+        return self._live.get(name, stub)
 
 
 registry = AdapterRegistry()

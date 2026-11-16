@@ -5,6 +5,7 @@ from devflow_api.models.audit import WorkflowAuditLog
 from devflow_api.models.base import Base
 from devflow_api.models.integration import IntegrationConfig
 from devflow_api.models.learning import LearningItem
+from devflow_api.models.mcp_approval import MCPApproval
 from devflow_api.models.project import Project
 from devflow_api.models.workflow import Workflow, WorkflowRun
 
@@ -13,6 +14,7 @@ __all__ = [
     "Base",
     "IntegrationConfig",
     "LearningItem",
+    "MCPApproval",
     "Project",
     "Workflow",
     "WorkflowAuditLog",

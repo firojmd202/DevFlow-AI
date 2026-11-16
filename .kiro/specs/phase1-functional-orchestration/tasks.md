@@ -1,10 +1,10 @@
 # DevFlow AI — Phase 1: Implementation Tasks
 
-**Version:** 1.5.4
-**Status:** Corrected — Final PR Readiness Reviewed
+**Version:** 1.5.7
+**Status:** Corrected — Wave 4 PENDING Approval Lifecycle Correction
 **Scope:** Phase 1 — Functional Orchestration
-**Branch:** feature/phase1-specification-planning
-**Base commit:** aaaaacb703124fc31b0e757b2bf1739c4fb225c9
+**Branch:** feature/phase1-wave4-integration-execution
+**Base commit:** 756100d1166c64b001da4a044ad22513197ab408
 **Last Updated:** 2026-11-16
 **Supersedes:** v1.3.0 (F1–F3 corrections applied — see .agents/tasks/phase1-v1.4.0-correction-report.md)
 
@@ -20,6 +20,9 @@
 - v1.5.3 — 2026-11-15 — Final PR Readiness Gate (C1–C2): C1 redundant workflow_run_id parameter removed from invoke_tool (I4 key implementation notes); only trusted_workflow_run_id: int | None remains; added explicit statement that trusted_workflow_run_id is resolved from server-side session context and never from tool arguments or client-supplied fields. C2 consume_atomic signature extended with all binding fields (I4 atomic consumption notes); in-transaction verification of all bindings documented; test_approval_modified_between_validation_and_consumption added to S2 tests and I7 all-tests list (now 26 total). Branch: feature/phase1-specification-planning.
 
 - v1.5.4 — 2026-11-16 — Wave 3 Response Contract Correction (W3-RC): resolved the REQ-W1.5.4 ↔ design §11.3 conflict reported in docs/reports/phase1-wave3-codex-report.md. Task A1 acceptance criterion 4 added: `GET /api/v1/workflow-runs/{run_id}` returns `WorkflowRunResponse` with `approvals` (all statuses, `created_at` ascending) and `pending_approvals` (pending subset), both `[]` not null when empty; A1 description notes `ApprovalRepository.list_for_run` (design §4.3) feeds the response (read-only, no migration). Task A5 adds three named tests: `test_workflow_run_response_includes_all_approvals`, `test_workflow_run_response_pending_approvals_filters_resolved`, `test_workflow_run_response_empty_approvals_returns_empty_list`. See requirements REQ-W1.5.4a–c; design §11.3, ADR-0013. Branch: feature/phase1-wave3-integration-execution.
+- v1.5.5 — 2026-11-16 — Wave 4 Specification Conflict Resolution (W4-CR): resolved four Wave 4 conflicts reported in docs/reports/phase1-wave4-spec-resolution.md. Conflict A (MCP transport): Task I4 key implementation notes corrected — `MCPClient` launches the configured server via an explicit-environment subprocess (`asyncio.create_subprocess_exec(..., env=resolved_env)`) feeding SDK `ClientSession`; SDK `stdio_client` dropped (merges parent env; no 5 s grace control); 4 new named subprocess tests added to I4 and I7. Conflict B (approval binding): migration 006 SQL and `MCPApproval` model FK changed from `ON DELETE SET NULL` to `ON DELETE RESTRICT`; 5 new named deletion/binding tests added to I4 and I7. Conflict C (live adapter capability metadata): Task I3/I7 acceptance criteria clarified — live adapters return `IntegrationCapability(available_in_phase_0=False)` (immutable Phase 0 schema `Literal[False]`). Conflict D (page numbering): Task I7 confirmed — Wave 4 updates existing `9_Integrations.py` and `10_Settings.py` (Replace/Extend); no new Integrations/Settings pages created. Branch: feature/phase1-wave4-integration-execution.
+- v1.5.6 — 2026-11-16 — Wave 4 Final FK Contract Correction (W4-FK): resolved the v1.5.5 RESTRICT contradiction. SQLite's `ON DELETE RESTRICT` is unconditional — it blocks deletion whenever ANY referencing `mcp_approvals` row exists, regardless of approval status — so the v1.5.5 acceptance criteria (CONSUMED/PENDING/REJECTED/EXPIRED approvals permit deletion) were unimplementable. Task I4 migration 006 SQL and `MCPApproval` model FK changed from `ON DELETE RESTRICT` back to `ON DELETE SET NULL`, combined with a database-enforced BEFORE DELETE trigger on `workflow_runs` (`trg_workflow_runs_before_delete_expire_approved_mcp_approvals`) created in migration 006 `upgrade()` (and dropped in `downgrade()`); the trigger sets `status='EXPIRED'` on every APPROVED MCPApproval referencing the run BEFORE the FK clears the reference. Verified against real SQLite foreign-key enforcement (SQLite library 3.49.1, 17/17 checks pass). The W4 deletion/binding named-test set in I4 and I7 updated: 1 renamed (`test_workflow_run_deletion_blocked_with_approved_mcp_approval` → `test_workflow_run_deletion_expires_approved_mcp_approval`, behavior changed from block to expire), 4 kept (rationale updated), 4 added (`test_workflow_run_deletion_preserves_consumed_approval`, `test_workflow_run_deletion_preserves_rejected_approval`, `test_expired_approval_after_deletion_cannot_be_consumed`, `test_trigger_rollback_restores_approval`). See docs/reports/phase1-wave4-fk-final-resolution.md. Branch: feature/phase1-wave4-integration-execution.
+- v1.5.7 — 2026-11-16 — Wave 4 PENDING Approval Lifecycle Correction (W4-PA): resolved the remaining MCP authorization lifecycle gap. Task I4 migration 006 trigger DDL updated: `AND status = 'APPROVED'` → `AND status IN ('PENDING', 'APPROVED')` and trigger renamed `trg_workflow_runs_before_delete_expire_mcp_approvals`; `downgrade()` drop updated to match. W4-FK deletion/binding test set updated in I4 named tests and I7 all-tests list: `test_workflow_run_deletion_allowed_with_pending_approval` renamed to `test_workflow_run_deletion_expires_pending_mcp_approval` (behavior changed from preserve to expire); `test_cascaded_deletion_handles_mcp_approvals` updated (PENDING also expires on cascade); `test_trigger_rollback_restores_approval` updated (restores both PENDING and APPROVED). Added: `test_orphaned_pending_approval_cannot_be_promoted`. Total W4-FK+PA deletion/binding tests: 10. See docs/reports/phase1-wave4-pending-approval-resolution.md. Branch: feature/phase1-wave4-integration-execution.
 
 ---
 
@@ -858,8 +861,27 @@ def upgrade() -> None:
     op.create_index("idx_mcp_approvals_server", "mcp_approvals", ["mcp_server_id"])
     op.create_index("idx_mcp_approvals_status", "mcp_approvals", ["status"])
     op.create_index("idx_mcp_approvals_expires", "mcp_approvals", ["expires_at"])
+    # W4-FK: BEFORE DELETE trigger expires PENDING and APPROVED MCP approvals
+    # (W4-PA: updated from APPROVED-only to IN ('PENDING','APPROVED')) before the
+    # ON DELETE SET NULL FK action clears the reference. See design §3.7a.
+    op.execute(
+        """
+        CREATE TRIGGER trg_workflow_runs_before_delete_expire_mcp_approvals
+        BEFORE DELETE ON workflow_runs
+        FOR EACH ROW
+        BEGIN
+            UPDATE mcp_approvals
+               SET status = 'EXPIRED'
+             WHERE workflow_run_id = OLD.id
+               AND status IN ('PENDING', 'APPROVED');
+        END;
+        """
+    )
 
 def downgrade() -> None:
+    op.execute(
+        "DROP TRIGGER IF EXISTS trg_workflow_runs_before_delete_expire_mcp_approvals"
+    )
     op.drop_index("idx_mcp_approvals_expires", table_name="mcp_approvals")
     op.drop_index("idx_mcp_approvals_status", table_name="mcp_approvals")
     op.drop_index("idx_mcp_approvals_server", table_name="mcp_approvals")
@@ -867,7 +889,8 @@ def downgrade() -> None:
 ```
 
 **Key implementation notes:**
-- Use `mcp` Python SDK's `stdio_client` and `ClientSession`.
+- MCP transport (W4-CR Conflict A): `MCPClient` launches the configured server as an explicit-environment subprocess via `asyncio.create_subprocess_exec(*command, *args, env=resolved_env, stdin=PIPE, stdout=PIPE, stderr=...)`, then wraps the subprocess stdio in the MCP Python SDK `ClientSession`. The SDK `stdio_client` is NOT used: SDK v1.x `stdio_client` merges `get_default_environment()` (parent PATH, Windows `USERPROFILE`, etc.) into the supplied env dict, which breaks explicit environment isolation, and exposes no configurable termination grace period. `ClientSession` is the supported SDK interface used here; the subprocess and its stream-bridging tasks are owned by `MCPClient` so the SIGTERM → 5 s grace → SIGKILL cleanup is deterministic.
+- `resolved_env` composition: starts from `MCPServerConfig.env` with `${SECRET_NAME}` interpolation; then adds the minimum required system environment variables needed for the child to start — Windows: `PATH`, `SYSTEMROOT`, `WINDIR`, `TEMP`, `TMP`, `PATHEXT`, `COMSPEC`; POSIX: `PATH`, `HOME`, `LANG`, `LC_ALL`, `TMPDIR` — explicitly, by name, from the parent environment (NOT by inheriting the whole parent env). No other parent variables are copied. Secrets are included ONLY via explicit `${SECRET_NAME}` interpolation from `SecretStr` Settings fields.
 - Secret interpolation pattern: `${VAR_NAME}` in `env` values is resolved ONLY if `VAR_NAME.upper()` resolves to a `SecretStr` attribute on `Settings`. If the attribute exists but is not `SecretStr`, or does not exist, raise `MCPSecretResolutionError`.
 - Log `arg_keys = list(arguments.keys())` — NEVER log argument values.
 - Terminate subprocess unconditionally in `finally` using SIGTERM → 5s grace → SIGKILL sequence.
@@ -900,7 +923,7 @@ def downgrade() -> None:
 3. `${GITHUB_TOKEN}` in env resolves to token value at process launch (not logged).
 4. `${MISSING}` raises `MCPSecretResolutionError` before process launch.
 5. Tool not in `allowed_tools` raises `MCPPermissionError` before subprocess starts.
-6. Subprocess is launched with `env=resolved_env` (verified by inspecting mock call arguments).
+6. The MCP server subprocess is launched via `asyncio.create_subprocess_exec` with `env=resolved_env` exactly (no parent-environment inheritance); the child receives ONLY `resolved_env` (required system vars + interpolated secrets). Verified by inspecting the `asyncio.create_subprocess_exec` mock call arguments: `env` is the resolved dict (not `None`) and contains no undeclared parent keys. The SDK `ClientSession` wraps the subprocess stdio; the SDK `stdio_client` is not used (W4-CR Conflict A).
 7. `MCPService.invoke_tool` signature accepts `mcp_approval_id: UUID | None`, not an `ApprovalRecord` or `ApprovalRequest` object.
 8. `MCPService.invoke_tool` raises `MCPApprovalRequiredError` for `consequential`/`unknown` tools when `mcp_approval_id` is None or the retrieved `MCPApproval` is not found/not APPROVED.
 9. `MCPService.invoke_tool` raises `MCPApprovalExpiredError` for an `MCPApproval` with `expires_at` in the past.
@@ -952,6 +975,24 @@ def downgrade() -> None:
 - `test_execution_failure_does_not_restore_approval` — after `mcp_tool_failed`, MCPApproval remains CONSUMED (F9)
 - `test_timeout_recorded_as_indeterminate_in_audit` — subprocess timeout logs `mcp_tool_failed`; MCPApproval not restored (F9)
 - `test_new_approval_required_for_retry_after_failure` — retry after failure requires new MCPApproval; consumed one raises MCPApprovalRequiredError (F9)
+
+**W4-CR Conflict A named tests (all 4 MUST be present in `tests/unit/test_mcp_client.py`):**
+- `test_mcp_subprocess_receives_explicit_env` — `asyncio.create_subprocess_exec` is called with `env=resolved_env` exactly (the resolved dict), and `ClientSession` is constructed from the subprocess stdio; the child receives only `resolved_env` (no parent-env merge).
+- `test_mcp_subprocess_does_not_inherit_parent_secrets` — a secret placed only in the parent/test environment (not in `MCPServerConfig.env` and not a resolvable `${...}`) is absent from the `env` passed to the spawned subprocess; the SDK `stdio_client`/`get_default_environment()` parent-merge path is not used.
+- `test_mcp_subprocess_terminated_on_timeout` — when `MCPServerConfig.timeout_seconds` elapses, `MCPClient` sends SIGTERM; after the 5 s grace the process is SIGKILLed if still alive; `MCPTimeoutError` is raised.
+- `test_mcp_subprocess_cleanup_in_finally_block` — on every exit path (success, error, timeout), the subprocess is terminated in a `finally` block (SIGTERM → 5 s grace → SIGKILL); no orphaned process is left.
+
+**W4-FK named deletion/binding tests (all 10 MUST be present in `tests/unit/test_mcp_approval_repository.py` or `tests/unit/test_mcp_service.py`):**
+- `test_workflow_run_deletion_expires_approved_mcp_approval` — [RENAMED from `test_workflow_run_deletion_blocked_with_approved_mcp_approval`; behavior changed from block to expire] deleting a `workflow_run` referenced by an APPROVED `MCPApproval` does NOT raise `IntegrityError`; the BEFORE DELETE trigger sets that approval's `status` to `EXPIRED` and the FK SET NULL clears `workflow_run_id` to NULL (`PRAGMA foreign_keys=ON`). The approval row is preserved (history) but is no longer consumable.
+- `test_workflow_run_deletion_expires_pending_mcp_approval` — [RENAMED from `test_workflow_run_deletion_allowed_with_pending_approval` in v1.5.7; behavior changed from preserve to expire — W4-PA] deleting a `workflow_run` referenced by a PENDING `MCPApproval` sets that approval's `status` to `EXPIRED` via the BEFORE DELETE trigger; the FK SET NULL clears `workflow_run_id` to NULL. The approval cannot be promoted to APPROVED after deletion.
+- `test_workflow_run_deletion_allowed_after_approval_consumed` — a CONSUMED `MCPApproval` does not block `workflow_run` deletion; it is preserved with `workflow_run_id` cleared to NULL (trigger does not touch CONSUMED).
+- `test_null_to_null_match_rejected_for_originally_bound_approval` — an approval originally bound to run X cannot become a valid unbound authorization after run deletion: the trigger expires it (status→EXPIRED) before the FK is nulled, so a later unbound invocation (`trusted_workflow_run_id = NULL`) fails the `consume_atomic` `status='APPROVED'` check (0 rows updated) rather than matching NULL-to-NULL.
+- `test_cascaded_deletion_handles_mcp_approvals` — [behavior updated — W4-PA] deleting a workflow cascades to delete each run; the trigger fires per run and expires PENDING and APPROVED approvals (then SET NULL clears the FK); CONSUMED/REJECTED/EXPIRED approvals are left untouched and have their FK cleared.
+- `test_workflow_run_deletion_preserves_consumed_approval` — [ADDED in v1.5.6] after deleting a run with a CONSUMED approval, the approval row still exists with `status='CONSUMED'` and `workflow_run_id=NULL` (history preserved, not deleted).
+- `test_workflow_run_deletion_preserves_rejected_approval` — [ADDED in v1.5.6] after deleting a run with a REJECTED approval, the approval row still exists with `status='REJECTED'` and `workflow_run_id=NULL`.
+- `test_expired_approval_after_deletion_cannot_be_consumed` — [ADDED in v1.5.6] an approval that was APPROVED before run deletion (now EXPIRED via trigger, `workflow_run_id=NULL`) cannot be consumed; `consume_atomic` updates 0 rows (`status='EXPIRED'` ≠ `'APPROVED'`) even for an unbound invocation.
+- `test_trigger_rollback_restores_approval` — [ADDED in v1.5.6; updated W4-PA] DELETE run (trigger fires, PENDING→EXPIRED and APPROVED→EXPIRED) within a transaction, then ROLLBACK; both approvals are restored to their original status (PENDING and APPROVED respectively) with their original `workflow_run_id` binding intact (the trigger is transactional).
+- `test_orphaned_pending_approval_cannot_be_promoted` — [ADDED in v1.5.7 — W4-PA] after a run deletion causes a PENDING approval to become EXPIRED (`workflow_run_id=NULL`), an attempt to resolve it as APPROVED (`UPDATE ... SET status='APPROVED' WHERE id=? AND status='PENDING'`) updates 0 rows; the approval remains EXPIRED and cannot authorize any MCP invocation.
 
 **Definition of Done:** Files committed; all criteria verified in I7 tests.
 
@@ -1019,6 +1060,8 @@ Extend `src/devflow_api/routers/integrations.py` to use `get_live()` for health 
 **Description:**
 Replace `9_Integrations.py` placeholder with live integration status. Extend `10_Settings.py` with Phase 1 configuration summary. Write all Wave 4 tests.
 
+**Page-numbering note (W4-CR Conflict D):** Wave 4 UPDATEs the EXISTING pages `9_Integrations.py` and `10_Settings.py` (which already exist from Phase 0 — see the actual file tree under `src/devflow_ui/pages/` and design §12.1 page inventory). It does NOT create new Integrations or Settings pages and does NOT renumber them. (The repository does not contain `3_Integrations.py` or `4_Settings.py`; page 3 is `3_Learning.py` and page 4 is `4_Specifications.py`. The canonical Wave 4 page names are `9_Integrations.py` and `10_Settings.py`, consistent with Task I7, design §12.1, and the existing navigation.)
+
 **Deliverables:**
 - `src/devflow_ui/pages/9_Integrations.py` — replaced
 - `src/devflow_ui/pages/10_Settings.py` — extended
@@ -1031,7 +1074,10 @@ Replace `9_Integrations.py` placeholder with live integration status. Extend `10
 **Required test cases (security-critical — must be named):**
 - `test_github_adapter_timeout_raises_integration_error` — when httpx raises TimeoutException, GitHubAdapter raises IntegrationExecutionError (REQ-S1.2)
 - `test_github_token_not_in_log_records` — asserts GITHUB_TOKEN value does not appear in any structlog record during adapter init or invocation (REQ-S1.3.2)
-- `test_mcp_subprocess_launched_with_explicit_env` — verifies `asyncio.create_subprocess_exec` is called with `env=resolved_env` and not `env=None` (REQ-S1.5.1, REQ-S1.5.4)
+- `test_mcp_subprocess_receives_explicit_env` — verifies `asyncio.create_subprocess_exec` is called with `env=resolved_env` exactly (no parent-env merge) and `ClientSession` wraps the subprocess stdio (REQ-S1.5.1, REQ-S1.5.4, REQ-M1.5.5–7)
+- `test_mcp_subprocess_does_not_inherit_parent_secrets` — a secret present only in the parent/test environment is absent from the `env` passed to the spawned subprocess (REQ-S1.5.4, REQ-M1.5.6)
+- `test_mcp_subprocess_terminated_on_timeout` — on `timeout_seconds` expiry, SIGTERM → 5 s grace → SIGKILL is applied; `MCPTimeoutError` raised (REQ-S1.5.2, REQ-M1.2.5)
+- `test_mcp_subprocess_cleanup_in_finally_block` — on every exit path the subprocess is terminated in `finally` (REQ-S1.5.2)
 - `test_mcp_secret_values_not_in_log_records` — asserts secret values in `MCPServerConfig.env` do not appear in log output (REQ-M1.5.3)
 
 **All test cases:**
@@ -1044,7 +1090,20 @@ Replace `9_Integrations.py` placeholder with live integration status. Extend `10
 - `test_figma_adapter_raises_missing_credential`
 - `test_mcp_call_tool_returns_result` (mocked subprocess)
 - `test_mcp_permission_denied_before_subprocess`
-- `test_mcp_subprocess_launched_with_explicit_env` ← security required
+- `test_mcp_subprocess_receives_explicit_env` — verifies `asyncio.create_subprocess_exec` called with `env=resolved_env` (not `env=None`) and `ClientSession` wraps the subprocess stdio (W4-CR Conflict A, REQ-S1.5.1, REQ-S1.5.4)
+- `test_mcp_subprocess_does_not_inherit_parent_secrets` ← W4-CR Conflict A required (parent-only secret absent from child env)
+- `test_mcp_subprocess_terminated_on_timeout` ← W4-CR Conflict A required (SIGTERM → 5 s grace → SIGKILL; MCPTimeoutError)
+- `test_mcp_subprocess_cleanup_in_finally_block` ← W4-CR Conflict A required (subprocess terminated on every exit path)
+- `test_workflow_run_deletion_expires_approved_mcp_approval` ← W4-FK required (BEFORE DELETE trigger expires APPROVED approval; SET NULL clears FK; run is deletable)
+- `test_workflow_run_deletion_allowed_after_approval_consumed` ← W4-FK required (CONSUMED preserved; FK nulled)
+- `test_workflow_run_deletion_expires_pending_mcp_approval` ← W4-PA required (PENDING expired by trigger; FK nulled; not preserved — renamed from test_workflow_run_deletion_allowed_with_pending_approval)
+- `test_null_to_null_match_rejected_for_originally_bound_approval` ← W4-FK required (originally-bound approval expired by trigger before NULL; not consumable)
+- `test_cascaded_deletion_handles_mcp_approvals` ← W4-FK/W4-PA required (workflow cascade → run delete → trigger expires PENDING and APPROVED)
+- `test_workflow_run_deletion_preserves_consumed_approval` ← W4-FK required (CONSUMED row preserved with NULL FK)
+- `test_workflow_run_deletion_preserves_rejected_approval` ← W4-FK required (REJECTED row preserved with NULL FK)
+- `test_expired_approval_after_deletion_cannot_be_consumed` ← W4-FK required (EXPIRED-after-deletion fails consume_atomic status check)
+- `test_trigger_rollback_restores_approval` ← W4-FK required (DELETE + ROLLBACK restores APPROVED + binding)
+- `test_orphaned_pending_approval_cannot_be_promoted` ← W4-PA required (EXPIRED-after-deletion PENDING cannot be promoted to APPROVED)
 - `test_mcp_secret_values_not_in_log_records` ← security required
 - `test_unknown_tool_denied_without_approval` ← MCP approval gate required
 - `test_consequential_tool_denied_without_approval` ← MCP approval gate required

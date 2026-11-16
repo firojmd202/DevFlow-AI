@@ -244,6 +244,14 @@
           "execution_mode": {
             "$ref": "#/components/schemas/ExecutionMode"
           },
+          "mode": {
+            "enum": [
+              "live",
+              "stub"
+            ],
+            "title": "Mode",
+            "type": "string"
+          },
           "name": {
             "title": "Name",
             "type": "string"
@@ -267,7 +275,8 @@
           "supported_actions",
           "auth_required",
           "auth_type",
-          "available_in_phase_0"
+          "available_in_phase_0",
+          "mode"
         ],
         "title": "IntegrationSummary",
         "type": "object"
