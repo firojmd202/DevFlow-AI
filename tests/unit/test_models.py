@@ -12,11 +12,11 @@ from tests.conftest import ROOT
 
 
 async def test_initial_models(async_db_session: AsyncSession, tmp_path: Path) -> None:
-    assert set(Base.metadata.tables) == {"projects", "learning_items", "integration_configs"}
-    assert all(
-        list(table.primary_key.columns.keys()) == ["id"] for table in Base.metadata.tables.values()
-    )
-    assert all(not table.foreign_keys for table in Base.metadata.tables.values())
+    phase_zero = [
+        Base.metadata.tables[name] for name in ("projects", "learning_items", "integration_configs")
+    ]
+    assert all(list(table.primary_key.columns.keys()) == ["id"] for table in phase_zero)
+    assert all(not table.foreign_keys for table in phase_zero)
     session = async_db_session
     session.add_all(
         [

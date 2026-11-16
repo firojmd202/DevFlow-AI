@@ -12,6 +12,13 @@ sync_url = get_settings().DATABASE_URL.replace("+aiosqlite", "")
 target_metadata = Base.metadata
 
 
+def include_name(name: str | None, type_: str, parent_names: object) -> bool:
+    # Migration 005 owns this table until Wave 5 registers its ORM model.
+    return not (
+        type_ == "table" and name == "repository_configs" and name not in target_metadata.tables
+    )
+
+
 def run_migrations_offline() -> None:
     context.configure(
         url=sync_url,
@@ -43,6 +50,7 @@ def run_migrations_online() -> None:
                 connection=connection,
                 target_metadata=target_metadata,
                 compare_server_default=True,
+                include_name=include_name,
             )
             with context.begin_transaction():
                 context.run_migrations()
