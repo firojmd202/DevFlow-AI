@@ -1,11 +1,11 @@
 # DevFlow AI — Phase 1: Implementation Tasks
 
-**Version:** 1.5.3
+**Version:** 1.5.4
 **Status:** Corrected — Final PR Readiness Reviewed
 **Scope:** Phase 1 — Functional Orchestration
 **Branch:** feature/phase1-specification-planning
 **Base commit:** aaaaacb703124fc31b0e757b2bf1739c4fb225c9
-**Last Updated:** 2026-11-15
+**Last Updated:** 2026-11-16
 **Supersedes:** v1.3.0 (F1–F3 corrections applied — see .agents/tasks/phase1-v1.4.0-correction-report.md)
 
 **Version history:**
@@ -18,6 +18,8 @@
 - v1.5.1 — MCP Security Hardening Pass (S1–S2): S1 workflow_run_id binding: 4 negative tests added to I4 named tests and I7 all-tests list; trusted_workflow_run_id parameter added to I4 key implementation notes; S2 atomic consumption: 5 negative tests added to I4 and I7; mcp_approval_rejected audit event noted; all 20 negative tests verified present in I7. Branch: feature/phase1-specification-planning.
 - v1.5.2 — 2026-11-15 — Type and Concurrency Alignment Pass (T1–T2): T1 trusted_workflow_run_id type corrected UUID → int | None in Task I4 key implementation notes and consume_atomic description; T2 SQLite concurrency model clarified in Task I4: removed incorrect pooling-serializes-writes claim, added BEGIN IMMEDIATE, busy_timeout policy, and retry rules; 5 new T2 negative tests added to I4 named tests and I7 all-tests list; total named tests in I7 now 25. Branch: feature/phase1-specification-planning.
 - v1.5.3 — 2026-11-15 — Final PR Readiness Gate (C1–C2): C1 redundant workflow_run_id parameter removed from invoke_tool (I4 key implementation notes); only trusted_workflow_run_id: int | None remains; added explicit statement that trusted_workflow_run_id is resolved from server-side session context and never from tool arguments or client-supplied fields. C2 consume_atomic signature extended with all binding fields (I4 atomic consumption notes); in-transaction verification of all bindings documented; test_approval_modified_between_validation_and_consumption added to S2 tests and I7 all-tests list (now 26 total). Branch: feature/phase1-specification-planning.
+
+- v1.5.4 — 2026-11-16 — Wave 3 Response Contract Correction (W3-RC): resolved the REQ-W1.5.4 ↔ design §11.3 conflict reported in docs/reports/phase1-wave3-codex-report.md. Task A1 acceptance criterion 4 added: `GET /api/v1/workflow-runs/{run_id}` returns `WorkflowRunResponse` with `approvals` (all statuses, `created_at` ascending) and `pending_approvals` (pending subset), both `[]` not null when empty; A1 description notes `ApprovalRepository.list_for_run` (design §4.3) feeds the response (read-only, no migration). Task A5 adds three named tests: `test_workflow_run_response_includes_all_approvals`, `test_workflow_run_response_pending_approvals_filters_resolved`, `test_workflow_run_response_empty_approvals_returns_empty_list`. See requirements REQ-W1.5.4a–c; design §11.3, ADR-0013. Branch: feature/phase1-wave3-integration-execution.
 
 ---
 
@@ -569,7 +571,7 @@ Write unit and integration tests covering all Wave 2 deliverables.
 **Estimated size:** Medium (3–4 hours)
 
 **Description:**
-Implement `src/devflow_api/routers/workflows.py` with all workflow and run endpoints defined in design.md §10.2.
+Implement `src/devflow_api/routers/workflows.py` with all workflow and run endpoints defined in design.md §10.2. The run-detail endpoint `GET /api/v1/workflow-runs/{run_id}` assembles `WorkflowRunResponse` from the `WorkflowRun` plus approvals returned by `ApprovalRepository.list_for_run(run_id)` (design §4.3, §11.3): `approvals` carries every associated approval (all statuses, ordered by `created_at` ascending) and `pending_approvals` is the pending-only subset (REQ-W1.5.4a–c). `ApprovalRepository.list_for_run` is a read-only addition to the existing Wave 2 repository; no migration is required.
 
 **Deliverables:**
 - `src/devflow_api/routers/workflows.py`
@@ -579,9 +581,10 @@ Implement `src/devflow_api/routers/workflows.py` with all workflow and run endpo
 1. `POST /api/v1/workflows` returns HTTP 201.
 2. `GET /api/v1/workflows?project_id={id}` filters correctly.
 3. `POST /api/v1/workflows/{id}/runs` returns HTTP 201 with `status=pending`.
-4. `GET /api/v1/workflow-runs/{run_id}/audit` returns audit entries ordered by `created_at`.
-5. `DELETE /api/v1/workflows/{id}` returns 204 and cascades run deletion.
-6. `mypy --strict src/devflow_api/routers/workflows.py src/devflow_api/schemas/workflow.py` exits with code 0.
+4. `GET /api/v1/workflow-runs/{run_id}` returns HTTP 200 with a `WorkflowRunResponse` whose `approvals` field contains every associated `ApprovalRequest` (all statuses) ordered by `created_at` ascending, and whose `pending_approvals` field contains only the pending subset; both are empty lists (never `null`) when the run has no approvals (REQ-W1.5.4a–c, design §11.3).
+5. `GET /api/v1/workflow-runs/{run_id}/audit` returns audit entries ordered by `created_at`.
+6. `DELETE /api/v1/workflows/{id}` returns 204 and cascades run deletion.
+7. `mypy --strict src/devflow_api/routers/workflows.py src/devflow_api/schemas/workflow.py` exits with code 0.
 
 **Definition of Done:** Files committed; all criteria verified in A5 tests.
 
@@ -686,6 +689,9 @@ Write unit and smoke tests for all Wave 3 deliverables.
 - `test_create_workflow_returns_201`
 - `test_list_workflows_filter_by_project_id`
 - `test_create_run_returns_pending_status`
+- `test_workflow_run_response_includes_all_approvals` — `GET /api/v1/workflow-runs/{run_id}` returns `approvals` containing every associated `ApprovalRequest` (both pending and resolved/expired), ordered by `created_at` ascending (REQ-W1.5.4a, design §11.3).
+- `test_workflow_run_response_pending_approvals_filters_resolved` — the same response's `pending_approvals` contains only approvals with `status == "pending"` (excludes `approved`, `rejected`, `expired`) and equals the pending subset of `approvals` (REQ-W1.5.4a).
+- `test_workflow_run_response_empty_approvals_returns_empty_list` — for a run with no approvals, both `approvals` and `pending_approvals` serialise as `[]`, not `null` (REQ-W1.5.4b).
 - `test_resolve_approval_approved_200`
 - `test_resolve_approval_already_resolved_409`
 - `test_invalid_status_transition_returns_422`

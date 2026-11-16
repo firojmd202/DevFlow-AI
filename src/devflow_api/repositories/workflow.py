@@ -26,11 +26,17 @@ class WorkflowRepository(BaseRepository[Workflow]):
         return await self.session.scalar(select(Workflow.status).where(Workflow.id == workflow_id))
 
     async def list_by_project(self, project_id: int) -> list[Workflow]:
-        query = select(Workflow).where(Workflow.project_id == project_id).order_by(Workflow.id)
-        return list((await self.session.scalars(query)).all())
+        return await self.list_filtered(project_id, None)
 
     async def list_by_status(self, status: str) -> list[Workflow]:
-        query = select(Workflow).where(Workflow.status == status).order_by(Workflow.id)
+        return await self.list_filtered(None, status)
+
+    async def list_filtered(self, project_id: int | None, status: str | None) -> list[Workflow]:
+        query = select(Workflow).order_by(Workflow.id)
+        if project_id is not None:
+            query = query.where(Workflow.project_id == project_id)
+        if status is not None:
+            query = query.where(Workflow.status == status)
         return list((await self.session.scalars(query)).all())
 
 

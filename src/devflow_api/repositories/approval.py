@@ -18,9 +18,18 @@ class ApprovalRepository(BaseRepository[ApprovalRequest]):
         super().__init__(ApprovalRequest, session)
 
     async def list_pending(self) -> list[ApprovalRequest]:
+        return await self.list_by_status("pending")
+
+    async def list_by_status(self, status: str | None) -> list[ApprovalRequest]:
+        query = select(ApprovalRequest).order_by(ApprovalRequest.created_at, ApprovalRequest.id)
+        if status is not None:
+            query = query.where(ApprovalRequest.status == status)
+        return list((await self.session.scalars(query)).all())
+
+    async def list_for_run(self, run_id: int) -> list[ApprovalRequest]:
         query = (
             select(ApprovalRequest)
-            .where(ApprovalRequest.status == "pending")
+            .where(ApprovalRequest.workflow_run_id == run_id)
             .order_by(ApprovalRequest.created_at, ApprovalRequest.id)
         )
         return list((await self.session.scalars(query)).all())

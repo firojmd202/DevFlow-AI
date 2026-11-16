@@ -9,8 +9,43 @@ from fastapi.responses import JSONResponse, Response
 from fastapi.utils import is_body_allowed_for_status_code
 from starlette.exceptions import HTTPException
 
+from devflow_api.adapters.exceptions import (
+    IntegrationExecutionError,
+    MCPApprovalExpiredError,
+    MCPApprovalRequiredError,
+    MCPPermissionError,
+    MCPServerNotFoundError,
+    MCPTimeoutError,
+    MissingCredentialError,
+)
 from devflow_api.schemas.common import ErrorResponse
+from devflow_core.exceptions import (
+    ApprovalAlreadyResolvedError,
+    ConfirmationAlreadyUsedError,
+    ConfirmationExpiredError,
+    ConfirmationMismatchError,
+    ConfirmationNotFoundError,
+    ConfirmationRequiredError,
+    InvalidStatusTransitionError,
+)
 from devflow_core.logging import get_logger
+
+_DOMAIN_ERRORS: dict[type[Exception], tuple[int, str, str]] = {
+    ApprovalAlreadyResolvedError: (409, "Approval already resolved", "APPROVAL_ALREADY_RESOLVED"),
+    InvalidStatusTransitionError: (422, "Invalid status transition", "INVALID_STATUS_TRANSITION"),
+    IntegrationExecutionError: (502, "Integration failed", "INTEGRATION_ERROR"),
+    MissingCredentialError: (403, "Credential required", "MISSING_CREDENTIAL"),
+    ConfirmationRequiredError: (422, "Confirmation required", "CONFIRMATION_REQUIRED"),
+    ConfirmationExpiredError: (422, "Confirmation expired", "CONFIRMATION_EXPIRED"),
+    ConfirmationMismatchError: (422, "Confirmation mismatch", "CONFIRMATION_MISMATCH"),
+    ConfirmationAlreadyUsedError: (409, "Confirmation already used", "CONFIRMATION_ALREADY_USED"),
+    ConfirmationNotFoundError: (404, "Confirmation not found", "CONFIRMATION_NOT_FOUND"),
+    MCPServerNotFoundError: (404, "MCP server not found", "MCP_SERVER_NOT_FOUND"),
+    MCPPermissionError: (403, "MCP permission denied", "MCP_PERMISSION_DENIED"),
+    MCPTimeoutError: (504, "MCP request timed out", "MCP_TIMEOUT"),
+    MCPApprovalRequiredError: (403, "MCP approval required", "MCP_APPROVAL_REQUIRED"),
+    MCPApprovalExpiredError: (403, "MCP approval expired", "MCP_APPROVAL_EXPIRED"),
+}
 
 
 def _error(status: int, message: str, code: str) -> JSONResponse:
@@ -42,6 +77,14 @@ async def _validation_error(request: Request, exc: Exception) -> JSONResponse:
     return _error(422, "Validation error", "VALIDATION_ERROR")
 
 
+async def _domain_error(request: Request, exc: Exception) -> JSONResponse:
+    for error_type in type(exc).__mro__:
+        mapping = _DOMAIN_ERRORS.get(error_type)
+        if mapping is not None:
+            return _error(*mapping)
+    return await handle_unexpected_error(request, exc)
+
+
 async def handle_unexpected_error(request: Request, exc: Exception) -> JSONResponse:
     frames = extract_tb(exc.__traceback__)
     get_logger(__name__).error(
@@ -56,4 +99,6 @@ async def handle_unexpected_error(request: Request, exc: Exception) -> JSONRespo
 def add_error_handlers(app: FastAPI) -> None:
     app.add_exception_handler(HTTPException, _http_error)
     app.add_exception_handler(RequestValidationError, _validation_error)
+    for error_type in _DOMAIN_ERRORS:
+        app.add_exception_handler(error_type, _domain_error)
     app.add_exception_handler(Exception, handle_unexpected_error)

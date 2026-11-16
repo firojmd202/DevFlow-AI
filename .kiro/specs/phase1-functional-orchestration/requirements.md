@@ -1,11 +1,11 @@
 # DevFlow AI — Phase 1: Functional Orchestration Requirements
 
-**Version:** 1.5.3
+**Version:** 1.5.4
 **Status:** Corrected — Final PR Readiness Reviewed
 **Scope:** Phase 1 — Functional Orchestration
 **Branch:** feature/phase1-specification-planning
 **Base commit:** aaaaacb703124fc31b0e757b2bf1739c4fb225c9
-**Last Updated:** 2026-11-15
+**Last Updated:** 2026-11-16
 **Supersedes:** v1.3.0 (F1–F3 corrections applied — see .agents/tasks/phase1-v1.4.0-correction-report.md)
 
 **Version history:**
@@ -18,6 +18,7 @@
 - v1.5.1 — MCP Security Hardening Pass (S1–S2): S1 workflow_run_id binding rules added to REQ-M2.x (REQ-M2.5); S2 atomic consumption contract strengthened in REQ-M2.2 and REQ-M2.4; SQLite concurrency assumptions documented; 9 new named negative tests added; mcp_approval_rejected audit event reason field added to REQ-W1.7. Branch: feature/phase1-specification-planning.
 - v1.5.2 — 2026-11-15 — Type and Concurrency Alignment Pass (T1–T2): T1 trusted_workflow_run_id type corrected UUID → int | None in REQ-M2.5 (M2.5.1) and REQ-M2.2 consume_atomic signature; T2 SQLite concurrency model clarified in REQ-M2.2: removed incorrect pooling-serializes-writes claim, added BEGIN IMMEDIATE semantics, busy_timeout policy, and retry rules; 5 new T2 named negative tests added to REQ-M2.2. Branch: feature/phase1-specification-planning.
 - v1.5.3 — 2026-11-15 — Final PR Readiness Gate (C1–C2): C1 redundant workflow_run_id parameter removed from invoke_tool (REQ-M1.7 step 7, REQ-M2.5 M2.5.1); only trusted_workflow_run_id: int | None remains; added explicit statement that trusted_workflow_run_id is resolved from server-side session context and never from tool arguments or client-supplied fields. C2 consume_atomic signature extended with all binding fields (REQ-M2.2): actor_id, mcp_server_id, tool_name, arguments_hash, workflow_run_id as explicit parameters; in-transaction 8-step verification algorithm updated; test_approval_modified_between_validation_and_consumption added to named T2 tests (now 6 total). Branch: feature/phase1-specification-planning.
+- v1.5.4 — 2026-11-16 — Wave 3 Response Contract Correction (W3-RC): resolved the REQ-W1.5.4 ↔ design §11.3 conflict reported in docs/reports/phase1-wave3-codex-report.md. REQ-W1.5.4 refined to require the run-detail response to expose ALL associated ApprovalRequest records via an `approvals` field plus a `pending_approvals` pending-only subset (backward compatibility); added W1.5.4a (both fields typed `list[ApprovalResponse]`, ordered by `created_at` ascending; `pending_approvals` = pending subset of `approvals`), W1.5.4b (empty list `[]`, never `null`, when no approvals), W1.5.4c (read-only projection; no mutation, no restoration, no approval-lifecycle change). See design §11.3, §4.3, ADR-0013; tasks A1, A5. Branch: feature/phase1-wave3-integration-execution.
 
 ---
 
@@ -214,7 +215,10 @@ THEN `POST /api/v1/workflows/{id}/runs`, `GET /api/v1/workflows/{id}/runs`, and 
 W1.5.1 — `POST /api/v1/workflows/{id}/runs` returns HTTP 201 with `status = "pending"`.
 W1.5.2 — A run's `status` transitions are enforced: `pending → running → waiting_approval | completed | failed | cancelled`.
 W1.5.3 — Transitioning to an invalid status (e.g., `pending → completed` skipping `running`) returns HTTP 422 with `code = "INVALID_STATUS_TRANSITION"`.
-W1.5.4 — `GET /api/v1/workflow-runs/{run_id}` returns the full run including any associated `ApprovalRequest` records.
+W1.5.4 — `GET /api/v1/workflow-runs/{run_id}` returns the full run including ALL associated `ApprovalRequest` records. The response exposes every approval for the run via an `approvals` field, plus a `pending_approvals` field that is the pending-only subset (backward compatibility). Resolved and expired approvals remain visible in `approvals`; this is a read-only projection and does not mutate, reopen, or restore any `ApprovalRequest` or change the approval lifecycle (REQ-W1.6).
+W1.5.4a — `WorkflowRunResponse.approvals: list[ApprovalResponse]` contains every associated `ApprovalRequest` regardless of status (`pending`, `approved`, `rejected`, `expired`), ordered by `created_at` ascending. `WorkflowRunResponse.pending_approvals: list[ApprovalResponse]` is the subset of `approvals` whose `status == "pending"`, in the same order.
+W1.5.4b — When a run has no associated approvals, both `approvals` and `pending_approvals` return an empty list (`[]`), never `null`.
+W1.5.4c — Resolved approvals (`approved`, `rejected`, `expired`) remain visible in `approvals`. Reading them does not change `ApprovalRequest.status`, `resolved_at`, `resolved_by`, or any audit log entry; the approval lifecycle defined in REQ-W1.6 is unchanged.
 W1.5.5 — No Phase 1 code path reads `definition_json` and executes steps from it autonomously.
 
 ### REQ-W1.6

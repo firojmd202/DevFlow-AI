@@ -24,6 +24,14 @@ async def test_health_and_openapi(test_client: httpx.AsyncClient) -> None:
         "/api/v1/learning/{id}",
         "/api/v1/integrations",
         "/api/v1/integrations/{name}/health",
+        "/api/v1/workflows",
+        "/api/v1/workflows/{id}",
+        "/api/v1/workflows/{id}/runs",
+        "/api/v1/workflow-runs/{run_id}",
+        "/api/v1/workflow-runs/{run_id}/audit",
+        "/api/v1/approvals",
+        "/api/v1/approvals/{id}",
+        "/api/v1/approvals/{id}/resolve",
     }
 
 
