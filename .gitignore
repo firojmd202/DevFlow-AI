@@ -45,3 +45,5 @@ local.properties
 Thumbs.db
 Desktop.ini
 /zip/
+/docs/
+/.agents/

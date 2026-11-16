@@ -41,6 +41,8 @@ class Settings(BaseSettings):
     OLLAMA_BASE_URL: str = "http://localhost:11434"
     OLLAMA_TIMEOUT_SECONDS: int = Field(default=30, gt=0)
     GITHUB_API_BASE_URL: str = "https://api.github.com"
+    LOCAL_OPERATOR_ID: str = Field(default="local_operator", min_length=1)
+    GITHUB_CONFIRMATION_TTL_SECONDS: int = Field(default=600, gt=0)
     FIGMA_API_BASE_URL: str = "https://api.figma.com"
     MCP_SERVERS_CONFIG: str = ""
 

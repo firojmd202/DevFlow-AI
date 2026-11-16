@@ -1,7 +1,7 @@
 # DevFlow AI — Phase 1: Functional Orchestration Design
 
-**Version:** 1.5.8
-**Status:** Corrected — Wave 5 GitHub Orchestration Security Specification
+**Version:** 1.5.9
+**Status:** Corrected — Wave 5 Security Resolution (HTTP Outcome Classification, Canonical Binding, Trusted Local Principal)
 **Scope:** Phase 1 — Functional Orchestration
 **Branch:** feature/phase1-wave5-github-orchestration
 **Base commit:** bceb9bab4328fe4ca5ed068a25fa9f541841f0ff
@@ -24,6 +24,7 @@
 - v1.5.6 — 2026-11-16 — Wave 4 Final FK Contract Correction (W4-FK): resolved the v1.5.5 RESTRICT contradiction. SQLite's `ON DELETE RESTRICT` is unconditional — it blocks deletion whenever ANY referencing `mcp_approvals` row exists, regardless of approval status — so the v1.5.5 acceptance criteria (CONSUMED/PENDING/REJECTED/EXPIRED approvals permit deletion) were unimplementable. §3.7a `mcp_approvals.workflow_run_id` FK changed from `ON DELETE RESTRICT` back to `ON DELETE SET NULL`, combined with a database-enforced BEFORE DELETE trigger on `workflow_runs` (`trg_workflow_runs_before_delete_expire_approved_mcp_approvals`) that sets `status='EXPIRED'` on every APPROVED MCPApproval referencing the run BEFORE the FK clears the reference; §3.7a SQL DDL + model, §3.7 FK behaviors table, §3.7 deletion-invariant note + security rationale, and §7.5 model notes + EXPIRED-rejection note updated. Verified against real SQLite foreign-key enforcement (SQLite library 3.49.1, 17/17 checks pass): the BEFORE DELETE trigger fires before the FK SET NULL action (APPROVED→EXPIRED, not left APPROVED-with-NULL-FK); CONSUMED/PENDING/REJECTED/EXPIRED preserved with FK cleared to NULL; originally-unbound approvals unaffected; the EXPIRED approval cannot be consumed (`consume_atomic` 0 rows); cascaded deletion (workflow delete → run cascade) expires APPROVED with default SQLite settings (no `recursive_triggers` PRAGMA required); project delete does not reach runs; ROLLBACK restores the approval. The deletion/binding test set updated: 1 renamed, 4 kept (rationale updated), 4 added. See docs/reports/phase1-wave4-fk-final-resolution.md. Branch: feature/phase1-wave4-integration-execution.
 - v1.5.7 — 2026-11-16 — Wave 4 PENDING Approval Lifecycle Correction (W4-PA): resolved the remaining MCP authorization lifecycle gap. A PENDING MCPApproval bound to workflow run X survived deletion of X with `status='PENDING'` and `workflow_run_id=NULL`, indistinguishable from an originally-unbound PENDING approval; a future resolve operation could promote it to APPROVED, authorizing an unbound invocation. Fix: §3.7a BEFORE DELETE trigger updated from `status='APPROVED'` to `status IN ('PENDING','APPROVED')` and renamed `trg_workflow_runs_before_delete_expire_mcp_approvals` (W4-PA); §3.7 FK behaviors table and §3.7 deletion-invariant + security rationale notes updated to cover PENDING; §3.7a MCPApproval model comment updated. Valid-status-transitions list gains `PENDING → EXPIRED` (run-deletion path, distinct from TTL). Run-deletion trigger note extended: approval-resolution flow MUST only resolve approvals whose status is PENDING; an EXPIRED approval cannot be resolved or promoted. Verified with real SQLite: 23/23 assertions pass (direct deletion, cascade, promotion prevention, rollback, unbound unaffected, consume_atomic rejection). See docs/reports/phase1-wave4-pending-approval-resolution.md. Branch: feature/phase1-wave4-integration-execution.
 - v1.5.8 — 2026-11-16 — Wave 5 GitHub Orchestration Security Specification (W5-GC): §3.7b updated — `github_confirmations` table gains `status TEXT NOT NULL DEFAULT 'ISSUED' CHECK (status IN ('ISSUED','EXPIRED','USED'))` column; BEFORE DELETE trigger `trg_workflow_runs_before_delete_expire_github_confirmations` added to migration 007 DDL; `GitHubConfirmationRepository.consume_atomic` updated to use `WHERE status='ISSUED'`; §3.7 FK behaviors table gains github_confirmations row; §8.2 security contract expanded with 13-rule security contract, execution outcomes (SUCCEEDED/FAILED/INDETERMINATE), `github_action_failed` and `github_confirmation_expired` audit events; §7.5b GitHub failure semantics clarified with the three outcomes; 10 new named negative tests added to §8.2; migration 007 DDL spec updated with status column, CHECK constraint, and trigger DDL. SQLite verification: 10/10 assertions pass. Branch: feature/phase1-wave5-github-orchestration.
+- v1.5.9 — 2026-11-16 — Wave 5 Security Resolution (W5-SR): resolved three security-sensitive conflicts. §8.2 updated with refined HTTP outcome classification: 4xx (400/401/403/404/409/422) = FAILED (definitively did NOT execute on GitHub); 5xx (500/502/503/504) + transport errors (httpx.TimeoutException, asyncio.TimeoutError, httpx.ConnectError, httpx.ReadError) = INDETERMINATE (may or may not have executed on GitHub). §8.2a added: authoritative canonical payload functions for branch_create and pr_create (`json.dumps(sort_keys=True, separators=(',',':'))`; SHA-256 hex; normalization rules; identical canonical function at issuance and consumption; repo_full_name from server-side RepositoryConfig). §8.2b added: trusted actor contract — actor_id from `Settings.LOCAL_OPERATOR_ID` (default `'local_operator'`), never from request body; Phase 1 is explicitly local-first single-user; all Phase 1 GitHub operations are standalone (`workflow_run_id=None`); workflow-bound GitHub operations deferred to future phase. §8.1 RepositoryService updated with refined validation sequence. 16 new named tests documented. See docs/reports/phase1-wave5-security-resolution.md. Branch: feature/phase1-wave5-github-orchestration.
 
 ---
 
@@ -1118,6 +1119,110 @@ class GitHubAdapter:
 
 ### 8.2 RepositoryService
 
+#### 8.2a Canonical Parameter Binding (W5-SR — authoritative)
+
+Both `issue_confirmation` and the consume validation path use the IDENTICAL canonical functions. The `parameters_hash` stored in `GitHubConfirmation` at issuance is recomputed at consumption from the provided parameters; any mismatch is rejected.
+
+```python
+# src/devflow_api/services/repository.py — canonical payload helpers
+import json
+import hashlib
+
+def canonical_branch_create_payload(
+    repo_full_name: str,
+    branch_name: str,
+    base_ref: str,
+) -> str:
+    """Canonical JSON for branch_create. sort_keys=True, no spaces (separators=(',',':'))."""
+    return json.dumps(
+        {
+            "operation": "branch_create",
+            "repo_full_name": repo_full_name,
+            "branch_name": branch_name,
+            "base_ref": base_ref,
+        },
+        sort_keys=True,
+        separators=(',', ':'),
+    )
+
+def canonical_pr_create_payload(
+    repo_full_name: str,
+    title: str,
+    body: str,
+    head_ref: str,
+    base_ref: str,
+) -> str:
+    """Canonical JSON for pr_create. sort_keys=True, no spaces (separators=(',',':'))."""
+    return json.dumps(
+        {
+            "operation": "pr_create",
+            "repo_full_name": repo_full_name,
+            "title": title,
+            "body": body,
+            "head_ref": head_ref,
+            "base_ref": base_ref,
+        },
+        sort_keys=True,
+        separators=(',', ':'),
+    )
+
+def hash_payload(payload: str) -> str:
+    """SHA-256 hex digest of UTF-8-encoded canonical JSON string."""
+    return hashlib.sha256(payload.encode('utf-8')).hexdigest()
+```
+
+**Normalization rules (applied before hashing):**
+- All string fields: stripped of leading/trailing whitespace.
+- `repo_full_name`: lowercased (GitHub repos are case-insensitive).
+- `branch_name` and ref names (`base_ref`, `head_ref`): NOT lowercased (Git refs are case-sensitive).
+- `body`: empty string `''` if `None` or not provided.
+
+**Repository identity rule:** `repo_full_name` is taken from the server-side `RepositoryConfig` record (looked up by `repo_config_id`), never from any client-supplied string. Once a confirmation is issued, the `parameters_hash` is immutable — the confirmation is bound to the exact parameters at issuance.
+
+#### 8.2b HTTP Outcome Classification (W5-SR — authoritative)
+
+Every `branch_create` and `pr_create` GitHub API call has one of three outcomes:
+
+| Outcome | Trigger | Key property |
+|---|---|---|
+| `SUCCEEDED` | HTTP 2xx with response body confirming the operation | Definitively DID execute on GitHub |
+| `FAILED` | HTTP 400, 401, 403, 404, 409, 422 | Definitively did NOT execute on GitHub |
+| `INDETERMINATE` | HTTP 500/502/503/504; `httpx.TimeoutException`; `asyncio.TimeoutError`; `httpx.ConnectError`; `httpx.ReadError` | May or may not have executed on GitHub |
+
+**FAILED vs INDETERMINATE is the critical distinction.** The confirmation is USED in both cases. Both require a new confirmation for retry. The difference is what the user must do before retrying: for FAILED they may retry immediately (operation did not happen); for INDETERMINATE they must verify GitHub state first (operation may have already happened).
+
+**Audit event:** both FAILED and INDETERMINATE log `github_action_failed` with an `outcome` field set to `'FAILED'` or `'INDETERMINATE'` respectively.
+
+**Reconciliation policy (INDETERMINATE):**
+1. Confirmation is already USED — never restored.
+2. No automatic retry.
+3. User must verify GitHub state manually (check if branch/PR exists) before issuing a new confirmation.
+4. Policy statement: *'DevFlow AI cannot guarantee exactly-once execution. Verify GitHub state before retrying.'*
+5. If the user reconciles and the operation succeeded: they should NOT issue a new confirmation for that resource.
+6. If the operation did not complete: a new `GitHubConfirmation` must be issued and approved for the retry.
+
+#### 8.2c Trusted Actor and Workflow Context (W5-SR — Phase 1 contract)
+
+**Local single-user principal:** Phase 1 is explicitly local-first with a single operator. There is no multi-user authentication system in Phase 1. The trusted `actor_id` is `Settings.LOCAL_OPERATOR_ID` (default `'local_operator'`). The `actor_id` is NEVER accepted from the HTTP request body or query parameters; it is resolved by the application layer from `Settings` before any service call.
+
+**Settings field (required addition):**
+```python
+# src/devflow_core/config.py — add to Settings
+LOCAL_OPERATOR_ID: str = "local_operator"
+```
+
+**Standalone operation policy:** All Phase 1 GitHub operations are standalone — `workflow_run_id=None`. Workflow-bound GitHub operations (confirmations issued with a specific `workflow_run_id`) are deferred to a future phase when server-side session context is available.
+
+Policy statement: *'Phase 1 GitHub operations are standalone (workflow_run_id=None). Workflow-bound GitHub operations are deferred to a future phase when server-side session context is available.'*
+
+**Deployment assumptions:**
+- Single local operator; no network exposure (binds to `127.0.0.1`).
+- No multi-user authentication.
+- `GitHubConfirmation` provides operation-level approval, not user authentication.
+- Policy: *'GitHubConfirmation is an operation-level authorization gate, not a user authentication mechanism. It assumes the operator has physical access to the local instance.'*
+
+#### 8.2d RepositoryService interface
+
 ```python
 class RepositoryService:
     def __init__(
@@ -1126,21 +1231,24 @@ class RepositoryService:
         audit_repo: AuditLogRepository,
         github_adapter: GitHubAdapter | GitHubStubAdapter,
         confirmation_repo: GitHubConfirmationRepository,
+        settings: Settings,   # W5-SR: provides LOCAL_OPERATOR_ID
     ) -> None: ...
 
     async def issue_confirmation(
         self,
-        repo_full_name: str,
+        repo_config_id: int,
         operation: Literal["branch_create", "pr_create"],
         parameters: dict[str, object],
-        actor_id: str,
-        workflow_run_id: int | None = None,
+        workflow_run_id: int | None = None,  # Always None in Phase 1 (standalone)
     ) -> GitHubConfirmation:
         """
         Creates and persists a GitHubConfirmation record.
-        Sets: parameters_hash = SHA-256(canonical JSON of parameters),
-              issued_at = now(UTC), expires_at = now(UTC) + TTL (default 10 minutes),
-              used_at = None.
+        actor_id = settings.LOCAL_OPERATOR_ID (never from request body).
+        repo_full_name = RepositoryConfig looked up by repo_config_id (never from client).
+        parameters_hash = hash_payload(canonical_*_payload(...)) — exact canonical function above.
+        Normalization applied before hashing: strip, lowercase repo_full_name, preserve refs.
+        issued_at = now(UTC), expires_at = now(UTC) + TTL (Settings.GITHUB_CONFIRMATION_TTL_SECONDS).
+        used_at = None. status = 'ISSUED'.
         Logs github_confirmation_issued audit event.
         Returns the GitHubConfirmation record (including its id).
         """
@@ -1151,18 +1259,22 @@ class RepositoryService:
         name: str,
         base_ref: str,
         confirmation_id: str,
-        actor_id: str,
+        # actor_id resolved from settings.LOCAL_OPERATOR_ID, not from caller
     ) -> BranchSummary:
         """
         1. Load GitHubConfirmation by confirmation_id. Raises ConfirmationNotFoundError if absent.
-        2. Validate operation == "branch_create". Raises ConfirmationMismatchError if wrong.
-        3. Validate parameters_hash matches SHA-256 of {name, base_ref, repo_config_id}.
-           Raises ConfirmationMismatchError (HTTP 422, code CONFIRMATION_MISMATCH) if mismatch.
-        4. Validate expires_at > now(UTC). Raises ConfirmationExpiredError (HTTP 422, code CONFIRMATION_EXPIRED) if expired.
-        5. Validate used_at is None. Raises ConfirmationAlreadyUsedError (HTTP 409) if used.
-        6. Set used_at = now(UTC). Logs github_action_authorized.
-        7. Calls GitHubAdapter.create_branch. Logs github_action_executed with actor=actor_id.
-        8. Logs branch_created audit event with actor="user".
+        2. Load RepositoryConfig by repo_config_id; derive repo_full_name (normalize: lowercase).
+        3. Validate operation == "branch_create". Raises ConfirmationMismatchError if wrong.
+        4. Recompute hash: hash_payload(canonical_branch_create_payload(repo_full_name, name.strip(), base_ref.strip()))
+           Compare against confirmation.parameters_hash. Raises ConfirmationMismatchError if mismatch.
+        5. Validate expires_at > now(UTC). Raises ConfirmationExpiredError (HTTP 422) if expired.
+        6. Call consume_atomic (status='ISSUED' → 'USED'). Raises ConfirmationAlreadyUsedError if not ISSUED.
+        7. Log github_action_authorized.
+        8. Call GitHubAdapter.create_branch.
+           - HTTP 2xx → outcome SUCCEEDED; log github_action_executed; log branch_created.
+           - HTTP 400/401/403/404/409/422 → outcome FAILED; log github_action_failed(outcome='FAILED'); raise.
+           - HTTP 5xx / TimeoutException / asyncio.TimeoutError / ConnectError / ReadError → outcome INDETERMINATE;
+             log github_action_failed(outcome='INDETERMINATE'); raise.
         """
 
     async def create_pull_request(
@@ -1173,30 +1285,44 @@ class RepositoryService:
         base: str,
         body: str,
         confirmation_id: str,
-        actor_id: str,
+        # actor_id resolved from settings.LOCAL_OPERATOR_ID, not from caller
     ) -> PullRequestSummary:
         """
         Same confirmation validation as create_branch, with operation == "pr_create".
+        Uses canonical_pr_create_payload(repo_full_name, title.strip(), body or '', head.strip(), base.strip()).
         No merge support.
-        Logs pr_created audit event with actor="user".
-        Logs github_action_authorized and github_action_executed.
+        Logs pr_created audit event (SUCCEEDED path only).
+        Logs github_action_failed(outcome='FAILED') for 4xx; github_action_failed(outcome='INDETERMINATE') for 5xx/transport.
         """
 ```
 
-**GitHubConfirmation record (F2 correction — SQLAlchemy ORM model, persisted to SQLite):**
+**Audit events logged by RepositoryService:**
+
+| Event type | Trigger | `outcome` field |
+|---|---|---|
+| `github_confirmation_issued` | `issue_confirmation` | — |
+| `github_action_authorized` | After confirmation validated, before adapter call | — |
+| `github_action_executed` | After adapter call succeeds (SUCCEEDED) | — |
+| `github_action_rejected` | When any confirmation validation fails | — |
+| `github_action_failed` | GitHub API call result was FAILED or INDETERMINATE | `'FAILED'` or `'INDETERMINATE'` |
+| `branch_created` | After `create_branch` succeeds | — |
+| `pr_created` | After `create_pull_request` succeeds | — |
+
+**GitHubConfirmation record (F2 correction — SQLAlchemy ORM model, persisted to SQLite; see §3.7b for full DDL and model definition):**
 ```python
 # src/devflow_api/models/github_confirmation.py  (SQLAlchemy model — see §3.7b for full definition)
 class GitHubConfirmation(Base):
     __tablename__ = "github_confirmations"
     id: Mapped[str]                       # UUID as text, primary key
-    repo_full_name: Mapped[str]
+    repo_full_name: Mapped[str]           # lowercased at issuance (normalized)
     operation: Mapped[str]                # "branch_create" | "pr_create"
-    parameters_hash: Mapped[str]          # SHA-256 of canonical JSON
-    actor_id: Mapped[str]
-    workflow_run_id: Mapped[int | None]   # nullable FK → workflow_runs.id
+    parameters_hash: Mapped[str]          # SHA-256 of canonical JSON (see §8.2a)
+    actor_id: Mapped[str]                 # Settings.LOCAL_OPERATOR_ID (W5-SR)
+    workflow_run_id: Mapped[int | None]   # nullable FK → workflow_runs.id; None in Phase 1
     issued_at: Mapped[datetime]
     expires_at: Mapped[datetime]          # default: issued_at + 10 minutes
     used_at: Mapped[datetime | None]      # None until first use; set atomically
+    status: Mapped[str]                   # 'ISSUED' | 'EXPIRED' | 'USED'
 ```
 
 **SUPERSEDED — see §3.7b:** The earlier design stub defined `GitHubConfirmation` as a Pydantic `BaseModel` for in-memory use. This is superseded by the SQLAlchemy model above with migration 007. In-memory storage is NOT acceptable (F2 correction). The persistence requirement ensures restart recovery and concurrent duplicate-consumption prevention.
@@ -1208,18 +1334,7 @@ class GitHubConfirmation(Base):
 - `confirmation_id` not found → HTTP 404, code `CONFIRMATION_NOT_FOUND`
 - `operation` or `parameters_hash` mismatch → HTTP 422, code `CONFIRMATION_MISMATCH`
 - `expires_at` in the past → HTTP 422, code `CONFIRMATION_EXPIRED`
-- `used_at` already set → HTTP 409, code `CONFIRMATION_ALREADY_USED`
-
-**Audit events logged by RepositoryService:**
-
-| Event type | Trigger |
-|---|---|
-| `github_confirmation_issued` | `issue_confirmation` |
-| `github_action_authorized` | After confirmation validated, before adapter call |
-| `github_action_executed` | After adapter call succeeds |
-| `github_action_rejected` | When any confirmation validation fails |
-| `branch_created` | After `create_branch` succeeds |
-| `pr_created` | After `create_pull_request` succeeds |
+- `status != 'ISSUED'` (already USED or EXPIRED) → HTTP 409, code `CONFIRMATION_ALREADY_USED`
 
 ---
 

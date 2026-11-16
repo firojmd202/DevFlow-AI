@@ -261,6 +261,10 @@ async def test_concurrent_consumption_only_one_succeeds(mcp_scope: Scope) -> Non
     assert sum(isinstance(item, ConsumedError) for item in outcomes) == 1
 
 
+async def test_mcp_approval_consume_atomic_safe(mcp_scope: Scope) -> None:
+    await test_concurrent_consumption_only_one_succeeds(mcp_scope)
+
+
 async def alter_before_consume(
     scope: Scope, monkeypatch: pytest.MonkeyPatch, **fields: object
 ) -> None:

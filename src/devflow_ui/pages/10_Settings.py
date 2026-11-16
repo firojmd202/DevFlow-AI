@@ -30,7 +30,14 @@ def render_settings() -> None:
         github_live = any(
             row.get("name") == "github" and row.get("mode") == "live" for row in integrations
         )
-        st.text(f"GitHub: {'connected' if github_live else 'no token'}")
+        if github_live:
+            github_health = asyncio.run(client.get_integration_health("github"))
+            if github_health is not None and github_health.get("status") == "ok":
+                st.text("GitHub: connected")
+            else:
+                st.text("GitHub: unavailable")
+        else:
+            st.text("GitHub: no token configured")
 
     if st.button("Check backend health"):
         health = asyncio.run(client.get_health())

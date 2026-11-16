@@ -74,6 +74,20 @@ class GitHubAdapter(LiveHTTPAdapter):
     async def health_check(self) -> dict[str, str]:
         return await self._health("/user")
 
+    async def verify_repository_access(self, owner: str, repo: str) -> None:
+        await self._request("verify_repository_access", "GET", self._repo_path(owner, repo))
+
+    async def resolve_ref(self, owner: str, repo: str, ref: str) -> str:
+        result = await self._json(
+            "resolve_ref",
+            f"{self._repo_path(owner, repo)}/commits/{quote(ref, safe='')}",
+            TypeAdapter(dict[str, object]),
+        )
+        sha = result.get("sha")
+        if not isinstance(sha, str) or not sha:
+            raise IntegrationExecutionError("github", "resolve_ref", None, "Invalid GitHub commit")
+        return sha
+
     def _repo_path(self, owner: str, repo: str) -> str:
         self._headers()
         if any(part in {"", ".", ".."} for part in (owner, repo)):

@@ -28,7 +28,7 @@ def migrated_mcp(sqlite_path: Path, monkeypatch: pytest.MonkeyPatch) -> Config:
     get_settings.cache_clear()
     config = Config(str(ROOT / "alembic.ini"))
     command.upgrade(config, "005_add_repository_tables")
-    command.upgrade(config, "head")
+    command.upgrade(config, "006_add_mcp_approvals")
     return config
 
 
@@ -141,13 +141,14 @@ def test_originally_unbound_approval_is_unaffected(
 def test_migration_006_round_trip(migrated_mcp: Config, sqlite_path: Path) -> None:
     for expected in (True, False, True):
         if expected:
-            command.upgrade(migrated_mcp, "head")
+            command.upgrade(migrated_mcp, "006_add_mcp_approvals")
         else:
             command.downgrade(migrated_mcp, "-1")
         with closing(sqlite3.connect(sqlite_path)) as db:
             objects = {row[0] for row in db.execute("SELECT name FROM sqlite_master")}
             assert ("mcp_approvals" in objects) is expected
             assert (TRIGGER in objects) is expected
+    command.upgrade(migrated_mcp, "head")
     command.check(migrated_mcp)
 
 
