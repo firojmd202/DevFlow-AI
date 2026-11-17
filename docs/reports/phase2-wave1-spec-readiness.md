@@ -1,6 +1,7 @@
 # Phase 2 Wave 1 — Specification Readiness Report
 
-**Report date:** 2026-11-17
+**Report date:** 2026-11-17 (updated for v2.1.0 reconciliation)
+**Spec version:** 2.1.0 (corrected; supersedes v2.0.0 — see `docs/reports/phase2-wave1-spec-resolution.md`)
 **Phase:** 2 — Wave 1 (Workflow Execution Engine)
 **Task type:** Specification only (no implementation)
 **Repository:** `kotlinandfluttertutorial-lab/DevFlow-AI`
@@ -35,15 +36,16 @@
 
 ## 3. Specification Files Created or Updated
 
-All files are **new** (no existing file modified; Phase 0/1 specs untouched):
+All files are **new** (no existing file modified; Phase 0/1 specs untouched). v2.0.0 → v2.1.0 reconciliation applied; see `docs/reports/phase2-wave1-spec-resolution.md`.
 
 | File | Deliverable | Status |
 |---|---|---|
-| `.kiro/specs/phase2-wave1-workflow-execution-engine/requirements.md` | (1) Requirements + (4) acceptance criteria/test matrix | Created |
-| `.kiro/specs/phase2-wave1-workflow-execution-engine/design.md` | (2) Architecture & design + (5) data model/migration plan + (6) API contracts + (7) security/threat model + (8) state-transition spec + executor contracts | Created |
-| `.kiro/specs/phase2-wave1-workflow-execution-engine/tasks.md` | (3) Task breakdown with dependencies | Created |
-| `docs/planning/phase2-roadmap.md` | (9) Phase 2 six-wave roadmap | Created |
-| `docs/reports/phase2-wave1-spec-readiness.md` | (10) Specification readiness report | Created |
+| `.kiro/specs/phase2-wave1-workflow-execution-engine/requirements.md` | (1) Requirements + (4) acceptance criteria/test matrix | Updated to v2.1.0 |
+| `.kiro/specs/phase2-wave1-workflow-execution-engine/design.md` | (2) Architecture & design + (5) data model/migration plan + (6) API contracts + (7) security/threat model + (8) state-transition spec + executor contracts | Updated to v2.1.0 |
+| `.kiro/specs/phase2-wave1-workflow-execution-engine/tasks.md` | (3) Task breakdown with dependencies | Updated to v2.1.0 |
+| `docs/planning/phase2-roadmap.md` | (9) Phase 2 six-wave roadmap | Updated to v2.1.0 |
+| `docs/reports/phase2-wave1-spec-readiness.md` | (10) Specification readiness report | Updated to v2.1.0 |
+| `docs/reports/phase2-wave1-spec-resolution.md` | Reconciliation report (findings, resolutions, traceability, risks) | Created (v2.1.0) |
 | `.agents/tasks/phase2-wave1-preflight.md` | Preflight evidence | Created |
 
 **Deliverable coverage (task §6, ten required):** all ten delivered. Migration revision number is **not invented arbitrarily** — `008_add_workflow_execution_engine` is the next logical revision from the verified head `007_add_github_confirmations`, and the spec instructs the implementer to re-confirm the head before authoring (task §6 requirement satisfied).
@@ -78,9 +80,11 @@ Consistency review (task §8) performed across requirements/design/tasks/roadmap
 - **SQLite patterns**: `BEGIN IMMEDIATE`, `busy_timeout`, CAS `rowcount`, executor call outside DB transaction; consistent in design §10 and tasks. ✓
 - **Backward compatibility**: Phase 1 constraints/endpoints/schemas preserved; Phase 1 tests pass unmodified (no constraint-test edits needed due to `consumed_at` design). ✓
 
-Two acceptance-criteria numbering typos in `requirements.md` (E4.4.4 → E4.3.4, E4.4.10.2 → E4.10.2) were corrected before readiness.
+Two acceptance-criteria numbering typos in `requirements.md` (E4.4.4 → E4.3.4, E4.4.10.2 → E4.10.2) were corrected in v2.0.0; a further duplicate AC ID (REQ-E6.8 had two `E6.8.1`) and a task-name typo (`start_orume` → `start_or_resume`) were corrected in the v2.1.0 pass.
 
-**No contradictions, unsafe assumptions, or implementation blockers identified** within the Wave 1 scope. Open items are documented as decisions for review, not blockers (§8).
+**v2.1.0 reconciliation:** the v2.0.0 spec was re-reviewed against the 12 correction items in task §2 and the actual Phase 1 services. Twelve findings were resolved (pre-dispatch `READY→FAILED`/`PENDING→FAILED` transitions; retry split into transient `RUNNING→READY`; disambiguated interruption triggers; approval re-gating and single-use consumption races; run terminal derivation only when all steps terminal; immutable template snapshot per run; consistent attempt/budget semantics; pending vs approved validity; lease/attempt fencing; canonical schema-module naming; task/AC-ID fixes; added negative/concurrency tests). Resolved defaults were applied. Phase 1 compatibility was reconciled against the actual `WorkflowService.WORKFLOW_TRANSITIONS` and `ApprovalService` signatures (run `waiting_approval` transitions go through the approval service, not `transition_run`; legacy `NULL`-template runs preserved so Phase 1 tests pass unmodified). See `docs/reports/phase2-wave1-spec-resolution.md`.
+
+**No remaining contradictions, unsafe assumptions, or implementation blockers** within the Wave 1 scope. Remaining items are documented decisions for review, not blockers (§8; design §18).
 
 ## 6. Security Decisions
 
@@ -144,6 +148,6 @@ Resolve the open decisions in §8 with ChatGPT review before coding.
 
 ## 11. Final Readiness Verdict
 
-All ten required specification deliverables are produced, internally consistent, and aligned with the repository's existing spec structure and conventions. Preflight passed. Phase 1 backward compatibility is preserved by design (no CHECK-constraint changes; additive columns and one new table). Security claims are honest (explicit non-claim of OS sandboxing; prerequisites listed). Migration strategy is grounded in the verified Alembic head. Open items are documented decisions for review, not blockers.
+All ten required specification deliverables are produced (v2.1.0, corrected), internally consistent, and aligned with the repository's existing spec structure and conventions. Preflight passed. Phase 1 backward compatibility is preserved by design (no CHECK-constraint changes; additive columns, one new table, and one new run-snapshot extension; legacy `NULL`-template runs preserved). Phase 1 service compatibility is reconciled against the actual `WorkflowService`/`ApprovalService` code. Security claims are honest (explicit non-claim of OS sandboxing; prerequisites listed; fencing prevents stale-completion approval consumption). Migration strategy is grounded in the verified Alembic head. Resolved defaults are applied; remaining items are documented decisions for review, not blockers. The reconciliation report (`docs/reports/phase2-wave1-spec-resolution.md`) records every finding, resolution, changed file/section, design rationale, remaining risks, and the requirements-to-tests traceability.
 
 **PHASE 2 WAVE 1 SPEC READY — AWAITING CHATGPT REVIEW**

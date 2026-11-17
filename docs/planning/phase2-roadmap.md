@@ -1,7 +1,7 @@
 # DevFlow AI — Phase 2 Implementation Roadmap
 
-**Version:** 2.0.0
-**Status:** Initial Phase 2 roadmap — awaiting ChatGPT review
+**Version:** 2.1.0
+**Status:** Updated — Wave 1 spec reconciliation applied (awaiting ChatGPT review)
 **Branch:** `feature/phase2-wave1-workflow-execution-engine`
 **Base commit:** `2d077ecb9f96ff767160e6c1564b2c6f8d4e0a9e` (Phase 1 v1.5.9, PR #13 merged)
 **Last Updated:** 2026-11-17
@@ -9,6 +9,7 @@
 
 **Version history:**
 - v2.0.0 — 2026-11-17 — Initial six-wave Phase 2 roadmap. Defines Waves 1–6: Workflow Execution Engine, AI Specification Generation and Review, Kiro Guided Handoff and Codex CLI, Approval-Gated GitHub Automation, Streamlit Workflow Experience, Security Hardening and End-to-End Validation. Wave 1 specifications are authored in this branch (`feature/phase2-wave1-workflow-execution-engine`); Waves 2–6 are outlined only and are not specified in detail in Wave 1 (per scope).
+- v2.1.0 — 2026-11-17 — Wave 1 spec reconciliation pass (see `docs/reports/phase2-wave1-spec-resolution.md`): resolved defaults applied (pending TTL 3600s, approved authorization validity 3600s via separate column, concurrency 1, lease 60s, heartbeat 15s, recovery auto-reconcile + explicit start, mandatory executor guards, immutable full template snapshot per run); Wave 1 gate updated to reflect validity-bounded + fenced approvals, transient retries, and immutable template snapshot. Eight step states and six Phase 1 run states preserved.
 
 ---
 
@@ -79,17 +80,17 @@ Phase 1 head (verified): `007_add_github_confirmations`. Phase 2 extends the cha
 ### Wave 1 — Workflow Execution Engine
 **PR target:** `develop`
 **Complexity:** High
-**Gate:** Eight-state step lifecycle enforced; orchestrator creates/runs/stops/cancels runs; mock executor validates the engine; recovery interrupts stale steps; approval checkpoints are digest-bound and single-use; all REQ-E8.1 named tests pass; migration 008 round-trips; Phase 1 tests unchanged.
+**Gate:** Eight-state step lifecycle enforced (eight step states, six Phase 1 run states preserved); orchestrator creates/runs/stops/cancels runs with immutable template snapshot per run; mock executor validates the engine; recovery auto-reconciles stale steps (no auto-dispatch); approval checkpoints are digest-bound, single-use, validity-bounded, and fenced against stale completions; retries are transient (`RUNNING→READY`, never via `FAILED`); all REQ-E8.1 named tests pass; migration 008 round-trips (incl. `workflow_runs` snapshot + `approval_requests` validity columns); Phase 1 tests unchanged (legacy `NULL`-template runs preserved).
 
 | Task | Description | Size |
 |---|---|---|
 | T1 | Workflow template schema + validation | M |
-| T2 | `WorkflowStepRun` model + migration 008 | M |
-| T3 | Repositories (step run CAS/lease + approval consume) | M |
-| T4 | Executor contract + MockExecutor + registry | M |
-| T5 | WorkflowOrchestrator (create/start/dispatch/succeed/fail) | L |
-| T6 | Approval checkpoints in the orchestrator | M |
-| T7 | Recovery service + leases | M |
+| T2 | `WorkflowStepRun` model + migration 008 (incl. run snapshot + approval validity columns) | M |
+| T3 | Repositories (step-run CAS/lease/fence + approval validity/consume) | M |
+| T4 | Executor contract (schemas/executor.py) + MockExecutor + registry | M |
+| T5 | WorkflowOrchestrator (create/start/dispatch/retry/cancel; Phase 1 service reuse) | L |
+| T6 | Approval checkpoints (binding, validity, re-gating, fenced consumption) | M |
+| T7 | Recovery service + leases (auto-reconcile, no auto-dispatch) | M |
 | T8 | Routers + OpenAPI | M |
 | T9 | Streamlit minimal UI | M |
 | T10 | Test suite (Wave 1) | L |
