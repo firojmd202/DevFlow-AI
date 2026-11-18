@@ -1,17 +1,18 @@
 # DevFlow AI — Phase 2 Wave 1: Workflow Execution Engine Requirements
 
-**Version:** 2.1.1
-**Status:** Final corrections (awaiting ChatGPT approval)
+**Version:** 2.1.2
+**Status:** Codex blocker resolution — awaiting ChatGPT review
 **Scope:** Phase 2 Wave 1 — Workflow Execution Engine
 **Branch:** `feature/phase2-wave1-workflow-execution-engine`
 **Base commit:** `2d077ecb9f96ff767160e6c1564b2c6f8d4e0a9e` (Phase 1 v1.5.9, PR #13 merged)
-**Last Updated:** 2026-11-17
-**Supersedes:** v2.1.0. Extends `.kiro/specs/phase1-functional-orchestration/` (v1.5.9); does not modify it.
+**Last Updated:** 2026-11-18
+**Supersedes:** v2.1.1. Extends `.kiro/specs/phase1-functional-orchestration/` (v1.5.9); does not modify it.
 
 **Version history:**
 - v2.0.0 — 2026-11-17 — Initial Phase 2 Wave 1 specification.
 - v2.1.0 — 2026-11-17 — Reconciliation pass; 12 findings + Phase 1 service compatibility. See `docs/reports/phase2-wave1-spec-resolution.md`.
-- v2.1.1 — 2026-11-17 — Final corrections (two findings): **(F14)** approval consumption is moved to **before** the protected executor is invoked — lease acquisition, `attempt` increment, `READY → RUNNING`, and approval consumption are one atomic `BEGIN IMMEDIATE` transaction; a failed authorization leaves the step unexecuted (rolled back, re-gated); the executor runs only after the transaction commits (outside the DB transaction); consumed approvals are never restored on cancellation/failure/timeout/indeterminate; protected-operation retries require fresh authorization (re-gate). **(F15)** deterministic failure-stop policy: when a step terminally fails, no new dispatch occurs; in-flight `RUNNING` steps finish; every remaining non-terminal non-running step (`PENDING`/`READY`/`WAITING_APPROVAL`/`INTERRUPTED`) is settled to `FAILED` (`category = "skipped"`, reason `STEP_BLOCKED_BY_RUN_FAILURE`), with pending approvals expired; the run reaches `failed` only after the stop policy has settled all remaining steps. No ninth step status is introduced (settle reuses existing transitions to `FAILED`). New negative/concurrency/settle tests added. State-transition tables, acceptance criteria, task dependencies, and named tests reconciled.
+- v2.1.1 — 2026-11-17 — Final corrections (F14, F15). See `docs/reports/phase2-wave1-spec-resolution.md`.
+- v2.1.2 — 2026-11-18 — Codex blocker resolution (F16, F17). **(F16 — Approval expiry semantics):** `APPROVAL_EXPIRED` is returned whenever a Phase 2 pending approval is past `expires_at`, whether the TTL sweep has run or not (pre-sweep and post-sweep both yield the same response code); re-gating a `WAITING_APPROVAL` step after expiry goes through a new `WAITING_APPROVAL → WAITING_APPROVAL` self-transition (atomic: expire-old, create-new, re-gate audit) rather than through an intermediate `READY` state, so the Phase 1 `VALID_FROM` map is not needed; cancellation and failure-stop prevent re-gating. **(F17 — Concurrent approval gates and run status precedence):** multiple independent `WAITING_APPROVAL` steps are supported with one approval record each; run status is derived by precedence (`failed > cancelled > waiting_approval > running > pending`) applied atomically in a single read-then-set pass; `running → waiting_approval` is the only needed run transition for the first gate; additional gates leave the run `waiting_approval` (idempotent); approving one gate transitions only that step to `READY` and re-derives the run status (may stay `waiting_approval` if other gates remain); `WorkflowRunRepository.transition_status` is reused unchanged; a new `derive_and_persist_run_status` helper performs the derivation inside `BEGIN IMMEDIATE`. Traceability, acceptance criteria, test names, and task T5/T6 updated.
 
 ---
 
@@ -199,24 +200,26 @@ E2.3.3 — An audit `step_succeeded` entry is written with `step_key`, `step_ver
 
 ### REQ-E2.4
 WHEN an approval is required (initial gate or re-gate),
-THEN the orchestrator MUST transition the gated step `READY → WAITING_APPROVAL`, create an `ApprovalRequest` bound to `workflow_run_id`, `workflow_step_run_id`, `operation` (`protected_operation`), `parameters_hash` (SHA-256 of the canonical artifact/parameters), `actor_id` (`Settings.LOCAL_OPERATOR_ID`), `expires_at` (`requested_at + APPROVAL_TTL_SECONDS`), and write `approval_requested`. The run is derived to `waiting_approval` via the approval service (REQ-E2.9). **Re-gating** occurs when: a step is `READY` and `approvable` but has no consumable approval (none approved, or the approved one has expired (`now >= authorization_expires_at`) or was already consumed), OR the atomic dispatch-and-consume transaction failed authorization (REQ-E3.7 rolls back, leaving the step unexecuted). In all re-gate cases the step transitions `READY → WAITING_APPROVAL` and a fresh `ApprovalRequest` is created; an expired/consumed authorization is never reused.
+THEN the orchestrator MUST transition the gated step `READY → WAITING_APPROVAL`, create an `ApprovalRequest` bound to `workflow_run_id`, `workflow_step_run_id`, `operation` (`protected_operation`), `parameters_hash` (SHA-256 of the canonical artifact/parameters), `actor_id` (`Settings.LOCAL_OPERATOR_ID`), `expires_at` (`requested_at + APPROVAL_TTL_SECONDS`), and write `approval_requested`. The run is derived to `waiting_approval` via `derive_and_persist_run_status` (REQ-E2.10, REQ-E2.9). **Re-gating** occurs when: a step is `READY` and `approvable` but has no consumable approval (none approved, or the approved one has expired (`now >= authorization_expires_at`) or was already consumed), OR the atomic dispatch-and-consume transaction failed authorization (REQ-E3.7 rolls back, leaving the step unexecuted). **Re-gating from `WAITING_APPROVAL`** (after approval expiry detected during reconciliation) is handled by `expire_and_re_gate` (REQ-E3.8): the step stays `WAITING_APPROVAL`, the old approval is atomically expired and a new approval record created in the same `BEGIN IMMEDIATE` transaction; there is NO intermediate `READY` state and no run status change required for this path. In all initial-gate cases the step transitions `READY → WAITING_APPROVAL`. Cancellation and failure-stop prevent re-gating (REQ-E3.8.5, REQ-E3.8.6).
 
 **Acceptance Criteria:**
 E2.4.1 — The `ApprovalRequest` carries `operation`, `parameters_hash`, `actor_id`, `workflow_step_run_id`, `expires_at` (all non-null for Phase 2 gates).
 E2.4.2 — `approval_requested` audit entry includes `operation`, `parameters_hash`, `step_key`.
 E2.4.3 — While a step is `WAITING_APPROVAL`, the orchestrator dispatches no further protected action for that step.
-E2.4.4 — A step whose prior approved authorization expired (or was consumed) before dispatch re-gates to `WAITING_APPROVAL` with a fresh approval rather than dispatching or failing.
-E2.4.5 — A step whose atomic dispatch-and-consume transaction failed authorization (consume `rowcount == 0`) is left unexecuted (`READY`, lease not acquired) and re-gated to `WAITING_APPROVAL` with a fresh approval; the failed consume writes `approval_not_consumable`.
+E2.4.4 — A step whose prior approved authorization expired (or was consumed) before dispatch re-gates via `expire_and_re_gate` or the initial-gate path as appropriate.
+E2.4.5 — A step whose atomic dispatch-and-consume transaction failed authorization (consume `rowcount == 0`) is left unexecuted (`READY`, lease not acquired) and re-gated `READY → WAITING_APPROVAL` with a fresh approval; the failed consume writes `approval_not_consumable`.
+E2.4.6 — Re-gating from `WAITING_APPROVAL` (after expiry detected during reconciliation) is handled without passing through `READY`: the old approval is expired and the new one created atomically, the step stays `WAITING_APPROVAL`, and `approval_re_gated` is audited (REQ-E3.8).
 
 ### REQ-E2.5
 WHEN an approval is resolved,
-THEN `ApprovalService.resolve` (Phase 1, extended) MUST verify the approval is `pending` (409 `APPROVAL_ALREADY_RESOLVED` if not; 409 `APPROVAL_EXPIRED` if `pending` but past `expires_at`), set `status` to `approved`/`rejected`, set `resolved_at`/`resolved_by`, and, for a Phase 2 gate (approval has `workflow_step_run_id`), set `authorization_expires_at = resolved_at + APPROVAL_AUTHORIZATION_VALIDITY_SECONDS` and transition the gated step `WAITING_APPROVAL → READY` (`approved`) or `→ CANCELLED` (`rejected`); the run transitions `waiting_approval → running` (`approved`) or `→ cancelled` (`rejected`) as in Phase 1. Phase 1 approvals (no `workflow_step_run_id`) resolve exactly as Phase 1 (run only).
+THEN `ApprovalService.resolve` (Phase 1, extended) MUST verify the approval is `pending` and NOT past `expires_at`. If `status != 'pending'` (already approved/rejected/expired/consumed), return HTTP 409 `APPROVAL_ALREADY_RESOLVED`. If `status == 'pending'` AND `now >= expires_at` (Phase 2 approval with `expires_at` set), return HTTP 409 `APPROVAL_EXPIRED` — this error code takes precedence over `APPROVAL_ALREADY_RESOLVED` for Phase 2 pending approvals that have expired whether or not the TTL sweep has already run. For Phase 1 approvals (`expires_at IS NULL`), `APPROVAL_ALREADY_RESOLVED` applies as before. On valid approval: set `status` to `approved`/`rejected`, `resolved_at`/`resolved_by`, and for a Phase 2 gate (`workflow_step_run_id` present) on `approved` set `authorization_expires_at` and transition step `WAITING_APPROVAL → READY`; on `rejected` transition step `→ CANCELLED`; re-derive run status via `derive_and_persist_run_status` (REQ-E2.10).
 
 **Acceptance Criteria:**
-E2.5.1 — `approved` resumes the step to `READY` and the run to `running`; `rejected` cancels the step and the run.
-E2.5.2 — Resolving an already-resolved approval returns HTTP 409 `APPROVAL_ALREADY_RESOLVED` (Phase 1 behavior preserved).
-E2.5.3 — Resolving a `pending` approval past `expires_at` returns HTTP 409 `APPROVAL_EXPIRED`.
+E2.5.1 — `approved` resumes the step to `READY`; re-derived run status may remain `waiting_approval` if other gates are still pending.
+E2.5.2 — Resolving an already-resolved (approved/rejected/expired) approval returns HTTP 409 `APPROVAL_ALREADY_RESOLVED` for Phase 1 approvals and for Phase 2 approvals whose status is not `pending`.
+E2.5.3 — Resolving a Phase 2 `pending` approval past `expires_at` returns HTTP 409 `APPROVAL_EXPIRED` **regardless of whether the TTL sweep has already set status to `expired`** — both pre-sweep and post-sweep return this code. (Pre-sweep: `status == 'pending'` AND `now >= expires_at`. Post-sweep: `status == 'expired'` → falls under `APPROVAL_ALREADY_RESOLVED` for Phase 1; for Phase 2 the resolver must check the status and return `APPROVAL_EXPIRED` if `status == 'expired'` and `operation IS NOT NULL`.)
 E2.5.4 — On `approved`, `authorization_expires_at` is set; the approval is consumable only before that time (REQ-E3.3, E3.6).
+E2.5.5 — After `approved`, `derive_and_persist_run_status` is called; if no other `WAITING_APPROVAL` steps remain, the run transitions to `running`; if other gates remain, the run stays `waiting_approval`.
 
 ### REQ-E2.6
 WHEN a step fails terminally,
@@ -248,12 +251,43 @@ E2.8.3 — No executor module imports `devflow_api.repositories`, `devflow_api.s
 
 ### REQ-E2.9
 WHEN the orchestrator transitions the run,
-THEN it MUST reuse Phase 1 services compatibly: `pending → running`, `running → completed`, and `running → failed` via `WorkflowService.transition_run` (whose map is exactly `{"pending": {"running"}, "running": {"completed", "failed", "cancelled"}}`); the `running → waiting_approval` and `waiting_approval → running`/`→ cancelled` transitions via `ApprovalService` (`request_bound_approval` / `resolve`), which use `run_repo.transition_status` exactly as Phase 1's `request_approval`/`resolve` do; and `cancel` from any non-terminal run state via `run_repo.transition_status(run_id, "cancelled", <from-set>)`. The orchestrator MUST NOT introduce run states outside the Phase 1 six-value enum or attempt a transition not supported by the Phase 1 maps without the matching Phase 1 mechanism.
+THEN it MUST reuse Phase 1 services compatibly. The Phase 1 `WorkflowRunRepository.VALID_FROM` map is:
+```
+"running":          ("pending", "waiting_approval")
+"waiting_approval": ("running",)
+"completed":        ("running",)
+"failed":           ("running",)
+"cancelled":        ("running", "waiting_approval")
+```
+The orchestrator uses this map only for the initial run start (`pending → running`) and for `start_or_resume`'s first gate (`running → waiting_approval`). **Subsequent gates while the run is already `waiting_approval` do NOT need a run transition**: the step transitions `READY → WAITING_APPROVAL` and `derive_and_persist_run_status` (REQ-E2.10) leaves the run `waiting_approval` (idempotent). When an approval is `approved` and other gates remain, `derive_and_persist_run_status` leaves the run `waiting_approval` (not `running`) — the run only returns to `running` when no step is `WAITING_APPROVAL`. `run_repo.transition_status` for `waiting_approval → running` is called only by `derive_and_persist_run_status` and only when it confirms no remaining `WAITING_APPROVAL` steps. Cancel uses `transition_status` from any non-terminal run state (Phase 1 from-set covers all cases). The orchestrator never introduces run states outside the Phase 1 six-value enum.
 
 **Acceptance Criteria:**
 E2.9.1 — Run transitions used by the orchestrator are exactly those Phase 1 already supports; no new run state value is introduced.
-E2.9.2 — `pending → running` is issued once at the start of the first `start_or_resume` (so a step that gates immediately does `pending → running → waiting_approval`, both valid in Phase 1).
-E2.9.3 — A run cancelled while `waiting_approval` transitions `waiting_approval → cancelled` via `run_repo.transition_status` (mirroring Phase 1's reject path); no `transition_run` call is made for that state.
+E2.9.2 — `pending → running` is issued once at the start of the first `start_or_resume`.
+E2.9.3 — When two independent steps simultaneously reach gates, the run stays `waiting_approval`; re-deriving after each approval approval-or-rejection leaves the run correctly `waiting_approval` (gates remain) or `running` (all gates cleared).
+E2.9.4 — `derive_and_persist_run_status` reads all step states in one transaction and calls `transition_status` only for the winning target status per the precedence table (REQ-E2.10); it never issues a transition that conflicts with `VALID_FROM`.
+
+### REQ-E2.10
+WHEN run status must be derived and persisted after any step state change,
+THEN `derive_and_persist_run_status(run_id, session)` MUST, inside a single `BEGIN IMMEDIATE` transaction: (1) read the current run status and all step statuses; (2) compute the target run status using the precedence table below; (3) if target ≠ current and the transition is valid per `VALID_FROM`, call `transition_status` with the appropriate from-set; (4) if already in a terminal state, skip (idempotent). The precedence table (highest wins):
+
+| Priority | Condition | Run status |
+|---|---|---|
+| 1 | Any step `FAILED` AND failure-stop engaged AND all steps terminal | `failed` |
+| 2 | Run cancelled | `cancelled` (guarded externally; derive does not set this) |
+| 3 | Any step `WAITING_APPROVAL` | `waiting_approval` |
+| 4 | Any step `READY` or `RUNNING` or `INTERRUPTED` | `running` |
+| 5 | All steps `SUCCEEDED` | `completed` |
+| 6 | All steps `PENDING` (no dispatch yet) | `pending` |
+
+Failure-stop engaged = at least one step is terminally `FAILED` with `result_status` not `skipped`-only (a real failure, not just downstream settle). No `failed` derivation if in-flight `RUNNING` steps remain (rule 1 requires all terminal). The derivation must be safe to call repeatedly; it must not regress a terminal run status.
+
+**Acceptance Criteria:**
+E2.10.1 — After one of two independent gated steps is approved, `derive_and_persist_run_status` leaves the run `waiting_approval` (the other gate remains).
+E2.10.2 — After both gated steps are approved and no other gates remain, `derive_and_persist_run_status` transitions the run to `running`.
+E2.10.3 — Calling `derive_and_persist_run_status` on a completed run is a no-op (idempotent).
+E2.10.4 — When one step fails while another is `WAITING_APPROVAL` and a third `RUNNING`: the derivation leaves the run `running` (failure-stop engaged but not all terminal); once the `RUNNING` step terminates and the `WAITING_APPROVAL` step is settled (failure-stop), the derivation sets `failed`.
+E2.10.5 — The derivation transaction uses `BEGIN IMMEDIATE`; concurrent calls produce the same terminal state (CAS via `transition_status`; a lost race is a no-op since the winning call already set the correct status).
 
 ---
 
@@ -336,9 +370,19 @@ E3.7.4 — After a successful consume + execute that ends in `failed`/`cancelled
 E3.7.5 — An approvable step's retryable failure re-gates (`RUNNING → WAITING_APPROVAL`, fresh approval), not `RUNNING → READY`.
 E3.7.6 — A stale completion (superseded lease/attempt) does not re-consume any approval and does not overwrite the current result.
 
----
+### REQ-E3.8
+WHEN a `WAITING_APPROVAL` step's pending approval has expired (detected during reconciliation, resolve, or `start_or_resume`),
+THEN `ApprovalRequestRepository.expire_and_re_gate(step_run_id, new_approval_data)` MUST, inside a single `BEGIN IMMEDIATE` transaction: (1) expire the old `pending` approval by setting `status = 'expired'` (`WHERE workflow_step_run_id = ? AND status = 'pending'`); (2) create a new `ApprovalRequest` for the same step with a fresh `expires_at`; (3) the step status stays `WAITING_APPROVAL` throughout (no intermediate `READY` state, no run status change). The operation is atomic and idempotent: if no `pending` approval exists for the step (sweep already expired it), only step 2 executes. Each invocation writes one `approval_expired` and one `approval_re_gated` audit entry. This path applies ONLY when the step is `WAITING_APPROVAL`; a `READY` step follows the standard gate path (REQ-E2.4). Cancellation and failure-stop prevent re-gating: if the run is `cancelled` or failure-stop is engaged, `expire_and_re_gate` MUST NOT create a new approval and MUST NOT be called.
 
-## Area E4 — Execution Lifecycle and Recovery
+**Acceptance Criteria:**
+E3.8.1 — Pre-sweep expiry: a `WAITING_APPROVAL` step whose `pending` approval has `expires_at <= now` (sweep not yet run) is re-gated atomically — old approval expired, new created, step stays `WAITING_APPROVAL`.
+E3.8.2 — Post-sweep expiry: a `WAITING_APPROVAL` step whose approval status is already `expired` (sweep already ran) is re-gated atomically — only new approval created (no double-expire), step stays `WAITING_APPROVAL`.
+E3.8.3 — Re-gate is idempotent: if called twice, the second call creates one additional `pending` approval but does not corrupt state; the step stays `WAITING_APPROVAL`.
+E3.8.4 — `approval_expired` and `approval_re_gated` audit entries are written inside the same transaction.
+E3.8.5 — Re-gating is refused (raises `OperationNotPermitted`) when the run is in `cancelled` state.
+E3.8.6 — Re-gating is refused when failure-stop is engaged (another step is terminally `FAILED`); the step will be settled to `FAILED (skipped)` by the failure-stop policy instead.
+E3.8.7 — Concurrent `expire_and_re_gate` calls for the same step: exactly one succeeds; the other sees no matching `pending` approval and creates a second `pending` approval (a brief double-approval window). The implementer MUST document this risk; Wave 1 (concurrency=1) makes it unreachable in practice; a future `UNIQUE(workflow_step_run_id, status=pending)` partial-unique index can close it.
+E3.8.8 — After `expire_and_re_gate`, `POST /approvals/{old_id}/resolve` returns HTTP 409 `APPROVAL_EXPIRED` (old approval is `expired`; the new approval has a different `id`).
 
 **Scope note (maps to task W1.4):** the eight-state step lifecycle, valid transitions, terminal states, restart recovery, duplicate-dispatch prevention, leases, timeouts, cancellation, bounded retries, idempotency, stale detection, fencing, failure-stop settle, and audit — all SQLite-safe.
 
@@ -374,6 +418,7 @@ THEN the allowed transition map MUST be:
 | WAITING_APPROVAL → READY | yes | approval approved |
 | WAITING_APPROVAL → CANCELLED | yes | approval rejected / run cancel |
 | WAITING_APPROVAL → FAILED | yes | failure-stop settle (`skipped`, REQ-E4.12) |
+| WAITING_APPROVAL → WAITING_APPROVAL | yes | approval expired → re-gate (`expire_and_re_gate`, REQ-E3.8); step status unchanged; new approval record created atomically; run status unchanged |
 | INTERRUPTED → READY | yes | recovery: safe + `attempt < max_attempts` (no auto-dispatch; awaits explicit start) |
 | INTERRUPTED → FAILED | yes | recovery: unsafe / `attempt >= max_attempts`, OR failure-stop settle (`skipped`) |
 | INTERRUPTED → CANCELLED | yes | run cancel |
@@ -715,6 +760,32 @@ Approvals — pre-execution consumption & validity (F14):
 - `test_approval_re_gated_after_authorization_expiry`
 - `test_expired_pending_approval_cannot_be_promoted_to_approved`
 
+Approvals — expiry semantics (F16):
+- `test_approval_expired_pre_sweep_returns_expired_code` (pending, now>=expires_at, sweep not run)
+- `test_approval_expired_post_sweep_returns_expired_code` (status=expired after sweep; Phase 2 approval)
+- `test_phase1_approval_already_resolved_still_returned_for_expired` (Phase 1 approval, expires_at IS NULL)
+- `test_expire_and_re_gate_pre_sweep_waiting_approval_step` (old pending → expired + new pending, step stays WAITING_APPROVAL)
+- `test_expire_and_re_gate_post_sweep_waiting_approval_step` (old expired + new pending, step stays WAITING_APPROVAL)
+- `test_expire_and_re_gate_idempotent` (second call adds another pending, no corruption)
+- `test_expire_and_re_gate_refused_when_run_cancelled`
+- `test_expire_and_re_gate_refused_when_failure_stop_engaged`
+- `test_concurrent_expire_and_re_gate_produces_valid_state` (both succeed; two pending approvals; documented risk)
+- `test_old_approval_id_returns_expired_after_re_gate`
+
+Concurrent gates and run status precedence (F17):
+- `test_two_independent_gates_run_stays_waiting_approval`
+- `test_approve_one_of_two_gates_run_stays_waiting_approval`
+- `test_approve_both_gates_run_becomes_running`
+- `test_reject_one_gate_cancels_run_regardless_of_other_gate`
+- `test_executor_fails_while_gate_pending_run_stays_running_until_settled`
+- `test_derive_run_status_all_succeeded_returns_completed`
+- `test_derive_run_status_any_waiting_returns_waiting_approval`
+- `test_derive_run_status_failure_stop_all_terminal_returns_failed`
+- `test_derive_run_status_failure_stop_inflight_step_stays_running`
+- `test_derive_run_status_idempotent_on_terminal_run`
+- `test_derive_run_status_concurrent_calls_produce_consistent_state`
+- `test_run_status_precedence_failed_beats_waiting_approval`
+
 Approvals — general:
 - `test_approval_consumed_once_replay_rejected`
 - `test_approval_bound_to_step_a_cannot_authorize_step_b`
@@ -836,9 +907,11 @@ THEN migration 008 MUST be reversible: `upgrade` creates `workflow_step_runs`, a
 | Requirement | Task area (W1.x) | Design section |
 |---|---|---|
 | REQ-E1.x | W1.1 definition/execution model | §3 (data model), §4 (template model + snapshot) |
-| REQ-E2.x | W1.2 orchestration service | §5 (orchestration), §6 (interface), §5.8 (run transitions/compat) |
-| REQ-E3.x | W1.3 approval checkpoints | §7 (binding, validity, pre-execution consumption, re-gating) |
-| REQ-E4.x | W1.4 lifecycle & recovery | §8 (state machine), §9 (recovery), §10 (SQLite + fencing), §5.5 (failure-stop) |
+| REQ-E2.x | W1.2 orchestration service | §5 (orchestration), §6 (interface), §5.8 (run transitions/compat), §5.9 (derive_and_persist_run_status) |
+| REQ-E2.10 | W1.2 run status derivation | §5.9 (status-precedence table + algorithm) |
+| REQ-E3.x | W1.3 approval checkpoints | §7 (binding, validity, pre-execution consumption, re-gating, expiry re-gate) |
+| REQ-E3.8 | W1.3 expiry re-gate | §7.5 (expire_and_re_gate) |
+| REQ-E4.x | W1.4 lifecycle & recovery | §8 (state machine + WAITING_APPROVAL→WAITING_APPROVAL), §9 (recovery), §10 (SQLite + fencing), §5.5 (failure-stop) |
 | REQ-E5.x | W1.5 executor contracts | §6 (contract), §11 (mock) |
 | REQ-E6.x | W1.6 security | §12 (threat model) |
 | REQ-E7.x | W1.7 API & Streamlit | §13 (API), §14 (Streamlit) |

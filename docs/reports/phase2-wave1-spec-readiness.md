@@ -1,7 +1,7 @@
 # Phase 2 Wave 1 — Specification Readiness Report
 
-**Report date:** 2026-11-17 (updated for v2.1.1 final corrections)
-**Spec version:** 2.1.1 (final corrections; supersedes v2.1.0 and v2.0.0 — see `docs/reports/phase2-wave1-spec-resolution.md`)
+**Report date:** 2026-11-18 (updated for v2.1.2 Codex blocker resolution)
+**Spec version:** 2.1.2 (Codex blocker resolution; supersedes v2.1.1 — see `docs/reports/phase2-wave1-codex-blocker-resolution.md` and `docs/reports/phase2-wave1-spec-resolution.md`)
 **Phase:** 2 — Wave 1 (Workflow Execution Engine)
 **Task type:** Specification only (no implementation)
 **Repository:** `kotlinandfluttertutorial-lab/DevFlow-AI`
@@ -152,4 +152,4 @@ Resolve the open decisions in §8 with ChatGPT review before coding.
 
 All ten required specification deliverables are produced (v2.1.1, final corrections), internally consistent, and aligned with the repository's existing spec structure and conventions. Preflight passed. Phase 1 backward compatibility is preserved by design (no CHECK-constraint changes; additive columns, one new table, and one new run-snapshot extension; legacy `NULL`-template runs preserved). Phase 1 service compatibility is reconciled against the actual `WorkflowService`/`ApprovalService` code. Security claims are honest (explicit non-claim of OS sandboxing; prerequisites listed). Migration strategy is grounded in the verified Alembic head. v2.1.1 adds two final invariants: protected executors are never invoked before their approval is atomically consumed (lease+consume in one transaction, executor outside it, no restore on any outcome), and the failure-stop policy deterministically settles all remaining non-terminal non-running steps to `FAILED` (`skipped`) so the run reaches `failed` only after settle — no ninth step status introduced. Resolved defaults are applied; remaining items are documented decisions for approval, not blockers. The reconciliation report (`docs/reports/phase2-wave1-spec-resolution.md`) records all fifteen findings (F1–F15), resolutions, changed files/sections, design rationale, remaining risks, and the requirements-to-tests traceability.
 
-**PHASE 2 WAVE 1 SPEC READY — AWAITING CHATGPT APPROVAL**
+**PHASE 2 WAVE 1 SPEC v2.1.2 — AWAITING CHATGPT REVIEW**
