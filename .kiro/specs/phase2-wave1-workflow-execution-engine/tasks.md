@@ -1,19 +1,18 @@
 # DevFlow AI — Phase 2 Wave 1: Workflow Execution Engine Tasks
 
-**Version:** 2.1.3
-**Status:** Final specification corrections — awaiting ChatGPT review
+**Version:** 2.1.4
+**Status:** Final edge-case corrections — awaiting ChatGPT review
 **Scope:** Phase 2 Wave 1 — Workflow Execution Engine
 **Branch:** `feature/phase2-wave1-workflow-execution-engine`
 **Base commit:** `2d077ecb9f96ff767160e6c1564b2c6f8d4e0a9e` (Phase 1 v1.5.9)
 **Last Updated:** 2026-11-18
-**Companions:** `requirements.md` (v2.1.3), `design.md` (v2.1.3).
+**Companions:** `requirements.md` (v2.1.4), `design.md` (v2.1.4).
 
 **Version history:**
-- v2.0.0 — 2026-11-17 — Initial task breakdown (T1–T11).
-- v2.1.0 — 2026-11-17 — Reconciliation pass (12 findings + Phase 1 compatibility).
-- v2.1.1 — 2026-11-17 — Final corrections (F14, F15).
-- v2.1.2 — 2026-11-18 — Codex blocker resolution (F16, F17).
-- v2.1.3 — 2026-11-18 — Final spec corrections (F18, F19). **T2** migration 008 DDL must include `CREATE UNIQUE INDEX uidx_approval_step_pending` on `approval_requests(workflow_step_run_id) WHERE status='pending' AND operation IS NOT NULL`; `downgrade()` must drop it. **T3** `expire_and_re_gate` updated: guarded-insert with `IntegrityError` catch; `SQLITE_BUSY` retry (3 attempts, exponential backoff); `derive_and_persist_run_status` raises `InvalidStatusTransitionError` on illegal transitions (not silent no-op). **T5** `start_or_resume` failure-stop path: derive fires `running` (not `waiting_approval`) when unsettled steps remain; callers catch and handle `InvalidStatusTransitionError` from derive per §5.9 concurrent-safety note. **T10** adds F18/F19 named tests. Critical path unchanged.
+- v2.0.0–v2.1.1 — See prior reports.
+- v2.1.2 — Codex blocker resolution (F16, F17).
+- v2.1.3 — Final spec corrections (F18, F19).
+- v2.1.4 — 2026-11-18 — Final edge-case corrections (CA, CB). **T3** `expire_and_re_gate` CA: pre-check validates `expires_at > now`; `IntegrityError` catch narrowed to `UniqueConstraintViolation`; session rollback semantics after violation explicitly defined. **T3/T5** `derive_and_persist_run_status` CB: `is_failure_stop` derived from persisted step state inside the transaction (not a caller flag); atomic two-step `waiting_approval → running → failed` when rule 2 fires and `current == waiting_approval`; signature changed to `derive_and_persist_run_status(run_id, session)`. **T10** adds CA/CB named tests. Critical path unchanged.
 
 ---
 
@@ -49,9 +48,10 @@
 ### T3 — Repositories (step run CAS/lease/fence + pre-execution consume + settle)
 **Area:** W1.2/W1.3/W1.4 (REQ-E1.7, E2.10, E3.3, E3.4, E3.6, E3.8, E4.6, E4.10, E4.11, E4.12). **Size:** M. **Depends on:** T2.
 - Add `WorkflowStepRunRepository`: `create_for_run`, `list_for_run`, `transition_cas` (`BEGIN IMMEDIATE`, CAS with `rowcount`), `dispatch_cas` (READY→RUNNING, increments `attempt`, sets lease + `idempotency_key`), `dispatch_protected_txn` (one transaction: lease CAS **AND** `consume_atomic`; on consume failure rollback both — step stays READY), `persist_result_cas` (RUNNING→terminal, fences on `lease_owner`+`attempt`), `renew_lease` (fenced), `release_lease`, `find_stale_running`, `list_interrupted`, `settle_to_failed` (failure-stop settle: PENDING/READY/WAITING_APPROVAL/INTERRUPTED → FAILED `skipped` via guarded CAS per state).
-- Add **`derive_and_persist_run_status(run_id, is_failure_stop, session)`** (REQ-E2.10, F17, F18): reads all step statuses; applies corrected precedence table (§5.9) — failure-stop precedes `WAITING_APPROVAL`; `waiting_approval → running` is legal per VALID_FROM; **raises `InvalidStatusTransitionError` for illegal transitions** (not a silent no-op); concurrent CAS races caught; inside `BEGIN IMMEDIATE`; idempotent on terminal runs.
-- Extend `ApprovalRequestRepository`: `create_bound`, `consume_atomic`, `expire_pending`, `set_authorization_expires_at`, **`expire_and_re_gate`** (REQ-E3.8, F16, F19: guarded-insert with `IntegrityError` catch on `uidx_approval_step_pending`; `SQLITE_BUSY` retry up to 3 × exponential backoff; cancellation/failure-stop guard; audit `approval_re_gate_noop` for the already-exists path).
+- Add **`derive_and_persist_run_status(run_id, session)`** (REQ-E2.10, F17, F18, CB): `is_failure_stop` derived from persisted step state inside the transaction (not a caller flag); applies corrected precedence table (§5.9); atomic two-step `waiting_approval → running → failed` when rule 2 fires and `current == 'waiting_approval'`; `InvalidStatusTransitionError` for all other illegal transitions; `BEGIN IMMEDIATE`; idempotent on terminal runs; concurrent-safe one-time re-read on CAS failure.
+- Extend `ApprovalRequestRepository`: `create_bound`, `consume_atomic`, `expire_pending`, `set_authorization_expires_at`, **`expire_and_re_gate`** (REQ-E3.8, F16, F19, CA: pre-check includes `expires_at > now` before returning existing pending; `UniqueConstraintViolation` only caught as concurrency conflict — other `IntegrityError` subclasses re-raise; session rollback and reset before re-read after `UniqueConstraintViolation`; `SQLITE_BUSY` retry up to 3 × exponential backoff; cancellation/failure-stop guard).
 - No single-step-delete method; no code path sets `consumed_at` back to `NULL`.
+- **Done when:** CAS/lease/fence/consume-settle/derive/re-gate unit tests green; F16 pre/post-sweep tests green; **F18/CB** derive two-step transition tests (E2.10.7, E2.10.10) green; **F19/CA** uniqueness, stale-pending, error-scoping, session-rollback tests (E3.8.3, E3.8.10–E3.8.12) green; `BEGIN IMMEDIATE` and index verified.
 - **Done when:** CAS/lease/fence/consume-settle/derive/re-gate unit tests green; F16 pre/post-sweep tests (E3.8.1, E3.8.2) green; **F18** derive-failure-stop-gate precedence tests (E2.10.4–E2.10.8) green; **F19** concurrent re-gate uniqueness tests (E3.8.3, E3.8.7, E3.8.9) green; `BEGIN IMMEDIATE` and index verified.
 
 ### T4 — Executor contract + MockExecutor + registry (canonical schema placement)
@@ -102,13 +102,13 @@
 - `AppTest` with mocked `APIClient`; no fabricated data; `mypy --strict` passes.
 - **Done when:** `AppTest` renders run+steps; buttons call correct endpoints; backend-unavailable notice shown.
 
-### T10 — Test suite (Wave 1, corrected to v2.1.3)
+### T10 — Test suite (Wave 1, corrected to v2.1.4)
 **Area:** W1.8 (REQ-E8.1–E8.3). **Size:** L. **Depends on:** T1–T9.
-- Implement all named tests in REQ-E8.1, including the v2.1.3 additions:
-  - **F18 failure-stop + gate precedence:** `test_failure_stop_with_waiting_approval_derives_running_not_waiting`, `test_failure_stop_settles_waiting_approval_step_transitions_run_waiting_to_running`, `test_failure_stop_all_steps_terminal_after_gate_settled_derives_failed`, `test_derive_illegal_transition_raises_not_silent_noop`, `test_derive_concurrent_race_caller_retries_once_and_succeeds`.
-  - **F19 concurrent re-gate uniqueness:** `test_expire_and_re_gate_concurrent_calls_produce_exactly_one_pending_approval`, `test_expire_and_re_gate_second_call_returns_existing_pending_no_duplicate`, `test_expire_and_re_gate_sqlite_busy_retried_bounded`, `test_expire_and_re_gate_partial_unique_index_enforces_uniqueness`, `test_phase1_approval_unaffected_by_partial_unique_index`, `test_migration_008_creates_partial_unique_index`.
-  - Plus all v2.1.2 tests (F16/F17 approval expiry, concurrent gates, run status precedence).
-- **Done when:** `ruff check .`, `mypy --strict src/`, `pytest --cov=src --cov-branch --cov-fail-under=80` all exit 0; all named tests (F14–F19) green; Phase 0/1 tests green.
+- Implement all named tests in REQ-E8.1, including the v2.1.4 additions:
+  - **CA stale-pending and error scoping:** `test_expire_and_re_gate_stale_pending_approval_not_reused`, `test_expire_and_re_gate_non_unique_integrity_error_propagates_unchanged`, `test_expire_and_re_gate_session_rolled_back_after_unique_constraint_violation`.
+  - **CB failure-stop normalization:** `test_failure_stop_all_terminal_while_run_waiting_approval_executes_two_step_transition`, `test_failure_stop_two_step_transition_atomic_no_intermediate_running_visible`, `test_concurrent_approval_resolve_cannot_bypass_failure_stop`, `test_derive_uses_persisted_step_state_for_failure_stop_flag`.
+  - Plus all v2.1.3 tests (F18/F19).
+- **Done when:** `ruff check .`, `mypy --strict src/`, `pytest --cov=src --cov-branch --cov-fail-under=80` all exit 0; all named tests (F14–F19, CA, CB) green; Phase 0/1 tests green.
 
 ### T11 — Wave 1 readiness report + final verification
 **Area:** W1.8 / reporting. **Size:** S. **Depends on:** T10.
@@ -163,12 +163,7 @@ Phase 1 baseline (2d077ec)
 - **Protected executors are not invoked before their approval is atomically consumed** (lease+consume in one transaction; executor outside the txn) ✓
 - **`consumed_at` is never set back to `NULL`** (no-restore guard) ✓
 - **Failure-stop settles all remaining non-terminal non-running steps to `FAILED` (`skipped`); no ninth step status** ✓
-- **F18: failure-stop + unsettled steps derives `running`, not `waiting_approval`** ✓
-- **F18: `waiting_approval → running` explicit and legal during failure-stop settlement** ✓
-- **F18: illegal transitions raise `InvalidStatusTransitionError`, not silent no-op** ✓
-- **F19: `uidx_approval_step_pending` partial unique index in migration 008 DDL** ✓
-- **F19: `expire_and_re_gate` concurrent calls produce exactly one pending approval** ✓
-- **F18/F19 named tests green** ✓
+- **CA/CB: stale-pending not reused, `UniqueConstraintViolation` narrowed, session rollback defined, two-step atomic transition** ✓
 - `docs/reports/phase2-wave1-spec-readiness.md` updated with verification evidence ✓
 
 ---

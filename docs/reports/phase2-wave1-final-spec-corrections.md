@@ -173,6 +173,6 @@ DROP INDEX IF EXISTS uidx_approval_step_pending;
 
 ## Final verdict
 
-**PHASE 2 WAVE 1 SPEC v2.1.3 — AWAITING CHATGPT REVIEW**
+**PHASE 2 WAVE 1 SPEC v2.1.4 — AWAITING CHATGPT REVIEW**
 
 No production code was written. No migrations were executed. No Codex was invoked. No push, PR, or merge was performed.
