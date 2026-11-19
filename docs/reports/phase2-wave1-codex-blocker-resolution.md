@@ -179,6 +179,4 @@ All F14/F15 named tests (v2.1.1) are preserved unchanged.
 
 All specification documents updated to v2.1.2. The two Codex implementation blockers (F16 approval expiry semantics, F17 concurrent approval gates) are resolved with fully specified behavior, compatibility with Phase 1 services preserved, and new named tests covering both pre-sweep and post-sweep expiry, concurrent gates, run status precedence, derive-idempotency, and concurrent derive safety.
 
-**PHASE 2 WAVE 1 SPEC v2.1.2 — AWAITING CHATGPT REVIEW**
-
-No production code was written. No migrations were authored. No push, PR, or merge was performed. The Codex implementation report (`docs/reports/phase2-wave1-implementation-report.md`) is preserved unchanged.
+**PHASE 2 WAVE 1 SPEC v2.1.3 — AWAITING CHATGPT REVIEW**
