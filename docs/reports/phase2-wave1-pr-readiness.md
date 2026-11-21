@@ -1,11 +1,11 @@
 # Phase 2 Wave 1 — PR Readiness Report
 
-**Report date:** 2026-11-21
+**Report date:** 2026-11-21 (updated for security.yml correction and final push readiness)
 **Repository:** `kotlinandfluttertutorial-lab/DevFlow-AI`
 **Branch:** `feature/phase2-wave1-workflow-engine-implementation`
 **Target:** `develop`
 **Specification version:** v2.1.4
-**Task type:** Readiness assessment only — no push, PR, merge, or deployment.
+**Task type:** Final readiness — includes security CI correction; push and PR pending user approval.
 
 ---
 
@@ -192,12 +192,7 @@ All checks run on current working tree at HEAD `2386a78` + staged implementation
 
 ### Recommendation
 
-The `secret-detection` job will block the PR on GitHub Actions because `--only-verified` requires network egress to external credential verification endpoints. The job is not currently exemptible by configuration.
-
-**Required change before PR can achieve full green CI:**
-Apply the one-line change to `.github/workflows/security.yml` described in §2: replace `--only-verified` with `--no-verification`.
-
-This change preserves the failure-on-finding guarantee. It merely removes the external verification call. It should be committed and pushed as part of or alongside the implementation PR.
+The `secret-detection` job previously used `--only-verified` which required network egress. This has been **corrected and committed** as `b110cda` (see §2 Applied correction above). The corrected workflow uses `--no-verification --network none --no-update` and sanitizes output inline.
 
 ---
 
@@ -205,13 +200,14 @@ This change preserves the failure-on-finding guarantee. It merely removes the ex
 
 | Risk | Severity | Mitigation |
 |---|---|---|
-| `security.yml` `--only-verified` will block CI | **High (blocker for green CI)** | Apply one-line change described in §2 before or with the PR push |
-| Local platform parity (Windows/Python 3.12.10 vs ubuntu-latest) | Medium | CI uses Python 3.12 on ubuntu-latest; no platform-specific code identified; asyncio/aiosqlite and SQLite versions may differ |
-| `docs/openapi.json` regenerated locally, not by CI script | Low | Test `openapi_execution_contract_matches_export` asserts actual paths; no `/merge`; merge-route guard present |
-| Offline secret scan ≠ CI `--only-verified` | Low (documented exception) | Zero candidates offline; `.env.example` has only placeholders; no real credentials in source |
-| Synchronous mock execution in HTTP request thread | Low | Noted in verification report; mock-only Wave 1; no production impact |
-| Audit is append-only by application, not cryptographically signed | Accepted | Documented; not a Wave 1 deliverable |
-| No OS-level process/filesystem/network isolation | Accepted | Documented in spec §12.4; prerequisite for future real-agent execution |
+| ~~`security.yml` `--only-verified` will block CI~~ | ~~**High (blocker for green CI)**~~ | **RESOLVED** — corrected in commit `b110cda` |
+| Local platform parity (Windows/Python 3.12.10 vs ubuntu-latest) | Medium | CI uses Python 3.12 on ubuntu-latest; no platform-specific code identified |
+| Docker Desktop not running locally for container-based scan | Low (documented) | Native TruffleHog binary used locally; CI uses Docker on ubuntu-latest |
+| `docs/openapi.json` regenerated locally | Low | Test `openapi_execution_contract_matches_export` asserts actual paths; no `/merge` |
+| Offline scan ≠ online `--only-verified` semantics | Low (documented exception) | 0 candidates offline; `.env.example` placeholder values only; no real credentials |
+| Synchronous mock execution in HTTP request thread | Low | Mock-only Wave 1; no production impact |
+| Audit append-only, not cryptographically signed | Accepted | Documented; not a Wave 1 deliverable |
+| No OS-level process/filesystem/network isolation | Accepted | Documented in spec §12.4; prerequisite for future waves |
 
 ---
 
@@ -234,24 +230,19 @@ This change preserves the failure-on-finding guarantee. It merely removes the ex
 
 ## 8. Required Actions Before Push
 
-1. **Commit the staged implementation files** with a commit message such as:
-   ```
-   feat(phase2-wave1): implement Workflow Execution Engine T1–T11 (v2.1.4)
-   ```
-2. **Apply the `security.yml` change** (replace `--only-verified` with `--no-verification`) and commit it. This is required for CI to pass. It can be in the same commit or a separate one.
-3. **Push to fork** (`git push -u fork feature/phase2-wave1-workflow-engine-implementation`) and open the PR from the fork into upstream `develop`, as was done for PR #14.
-4. **Monitor CI** — all 6 checks (lint, typecheck, test, dependency-scan, secret-detection, sast) should pass after the security.yml fix.
+1. **Implementation commit `df10e29` already staged and committed.** ✅
+2. **`security.yml` correction committed as `b110cda`.** ✅
+3. **Push to fork** (`git push -u fork feature/phase2-wave1-workflow-engine-implementation`) and open the PR.
+4. **Monitor CI** — all 6 checks should pass with the corrected security workflow.
 5. **Do not merge** until CI is green and the user separately approves.
 
 ---
 
 ## 9. Final Recommendation
 
-All implementation quality gates pass. The spec is v2.1.4 (ChatGPT-reviewed). No critical/high defects remain. The only blocker for a fully green PR is the `security.yml` online-verification requirement, which is resolvable with a one-line change.
+All quality gates pass. The spec is v2.1.4. No critical/high defects remain. The `security.yml` CI blocker has been corrected (commit `b110cda`). Offline TruffleHog scan on the full outgoing snapshot: **0 verified, 0 unverified secrets**. The branch is 5 commits ahead of `origin/develop`, clean, and ready to push.
 
 **PHASE 2 WAVE 1 PR READY — AWAITING USER APPROVAL**
-
-(Conditional on the `security.yml` one-line change being applied before or with the push.)
 
 ---
 
