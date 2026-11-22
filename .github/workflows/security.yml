@@ -31,7 +31,7 @@ jobs:
         run: |
           scan_root="$(mktemp -d)"
           git archive HEAD | tar -xf - -C "$scan_root"
-          docker run --rm --network none \
+          docker run --rm \
             -v "$scan_root:/scan:ro" \
             trufflesecurity/trufflehog:3.90.0 \
             filesystem /scan \
