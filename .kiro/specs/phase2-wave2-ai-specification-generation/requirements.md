@@ -1,7 +1,7 @@
 # DevFlow AI — Phase 2 Wave 2: AI Specification Generation and Review Requirements
 
-**Version:** 1.4.0
-**Status:** Draft — Implementation-contract aligned (corrections C1–C6)
+**Version:** 1.5.0
+**Status:** Draft — Approval integration clarified (corrections A1–A6)
 **Scope:** Phase 2 Wave 2 — AI Specification Generation and Review
 **Branch:** `feature/phase2-wave2-ai-spec-generation`
 **Base commit:** `b3b37ff` (Wave 1 implementation merged, develop HEAD)
@@ -9,11 +9,8 @@
 **Supersedes:** None (first Wave 2 specification). Extends `.kiro/specs/phase2-wave1-workflow-execution-engine/` (v2.1.4); does not modify it.
 
 **Version history:**
-- v1.0.0 — 2026-11-18 — Initial Wave 2 specification draft.
-- v1.1.0 — 2026-11-18 — Review findings addressed: F1–F17.
-- v1.2.0 — 2026-11-18 — Review findings addressed: F-NEW-1 through F-NEW-5.
-- v1.3.0 — 2026-11-18 — Integration corrections: F-FIN-1 through F-FIN-8.
-- v1.4.0 — 2026-11-18 — Implementation-contract alignment: C1 (REQ-W2.7.2 standalone path atomicity explicit), C2 (REQ-W2.7.2 workflow-bound path: human-decision vs. authorization-dispatch separated; `consumed_at` CAS is Wave 1's concern at dispatch time), C3 (`APPROVAL_EXPIRY_SECONDS` replaced with `APPROVAL_TTL_SECONDS`), C6 (MCP prerequisite retained).
+- v1.0.0–v1.4.0 — See prior version history.
+- v1.5.0 — 2026-11-18 — Approval integration clarification: A1/A2 (REQ-W2.7.5 is_implementation_authorized aligned to actual orchestrator checks; no SpecApproverExecutor claim), A3 (REQ-W2.7.5 ACs updated), A6 (REQ-W2.7.2/W2.7.3 targeted ACs for approved-not-consumed, consumed, expired-authorization, failed dispatch, replay).
 
 ---
 
@@ -480,12 +477,22 @@ W2.7.4.3 — The rejection reason is visible in the Streamlit audit timeline.
 
 ### REQ-W2.7.5
 WHEN implementation is requested,
-THEN the system MUST require an `Approved` specification version for the relevant `SpecificationRequest` before authorizing any downstream Wave 3 implementation task. The approval authorization MUST be checked by `SpecificationApprovalService.is_implementation_authorized(specification_request_id)` which verifies: a `SpecificationVersion` with `status = "Approved"` exists, its `content_digest` matches the current artifact content, and the approval has not been revoked.
+THEN the system MUST require an `Approved` specification version for the relevant `SpecificationRequest` before authorizing any downstream Wave 3 implementation task. The authorization MUST be checked by `SpecificationApprovalService.is_implementation_authorized(specification_request_id)`.
+
+**A3 — Aligned to actual Wave 1 orchestrator invariants.** The check verifies:
+1. A `SpecificationVersion` with `status = "approved"` exists for `request_id`.
+2. `SpecificationVersionRepository.verify_digest(version_id)` returns `True` (content digest unchanged since approval).
+3. **Standalone path only:** `specification_approval_requests.consumed_at IS NOT NULL` on the linked row (the approval was actually consumed, not merely resolved to `rejected_at`).
+4. **Workflow-bound path:** The spec status `"approved"` is sufficient — the Wave 1 orchestrator enforces `authorization_expires_at > now()` and `consumed_at IS NULL` at protected-dispatch time. Wave 2 does not re-check those fields here; they are Wave 1's gate.
+
+Returns `True` only when all applicable checks pass. Returns `False` for any other state.
 
 **Acceptance Criteria:**
-W2.7.5.1 — `is_implementation_authorized` returns `False` if no approved version exists for the request.
-W2.7.5.2 — `is_implementation_authorized` returns `False` if the approved version's `content_digest` does not match the current artifact content.
-W2.7.5.3 — No Wave 3 executor invocation path bypasses this check.
+W2.7.5.1 — `is_implementation_authorized` returns `False` if no `SpecificationVersion` with `status = "approved"` exists for the request.
+W2.7.5.2 — `is_implementation_authorized` returns `False` if `verify_digest` returns `False` for the approved version.
+W2.7.5.3 — For the standalone path: `is_implementation_authorized` returns `False` if `consumed_at IS NULL` on the linked `specification_approval_requests` row (approval resolved but not consumed).
+W2.7.5.4 — No Wave 3 executor invocation path bypasses this check.
+W2.7.5.5 — `is_implementation_authorized` does NOT check `authorization_expires_at` on `approval_requests` for the workflow-bound path; that check is Wave 1's responsibility at protected-dispatch time.
 
 ### REQ-W2.7.6
 WHEN audit evidence is required,

@@ -1,19 +1,16 @@
 # DevFlow AI — Phase 2 Wave 2: AI Specification Generation and Review Tasks
 
-**Version:** 1.4.0
-**Status:** Draft — Implementation-contract aligned (corrections C1–C6)
+**Version:** 1.5.0
+**Status:** Draft — Approval integration clarified (corrections A1–A6)
 **Scope:** Phase 2 Wave 2 — AI Specification Generation and Review
 **Branch:** `feature/phase2-wave2-ai-spec-generation`
 **Base commit:** `b3b37ff` (Wave 1 implementation merged, develop HEAD)
 **Last Updated:** 2026-11-18
-**Companions:** `requirements.md` (v1.4.0), `design.md` (v1.4.0).
+**Companions:** `requirements.md` (v1.5.0), `design.md` (v1.5.0).
 
 **Version history:**
-- v1.0.0 — 2026-11-18 — Initial Wave 2 task breakdown.
-- v1.1.0 — 2026-11-18 — Review findings addressed: F1, F3, F4, F5, F6, F9, F15, F17.
-- v1.2.0 — 2026-11-18 — Review findings addressed: F-NEW-1 through F-NEW-5.
-- v1.3.0 — 2026-11-18 — Integration corrections: F-FIN-1 through F-FIN-8.
-- v1.4.0 — 2026-11-18 — Implementation-contract alignment: C1 (W2.T7: standalone atomicity explicit in AC W2.T7.2 and W2.T7.14), C2 (W2.T7: resolve_bound two-phase model; W2.T7.3 and W2.T7.15 added), C3 (W2.T1: `APPROVAL_EXPIRY_SECONDS` replaced with `APPROVAL_TTL_SECONDS`), C5 (stale `workflow_id` prose reference removed).
+- v1.0.0–v1.4.0 — See prior version history.
+- v1.5.0 — 2026-11-18 — Approval integration clarification: A1/A2 (W2.T6/W2.T7 SpecApproverExecutor claim removed; new W2.T14 task for ExecutorRegistry extension), A3 (W2.T7: is_implementation_authorized ACs aligned), A4 (W2.T7: workflow-bound parameters_hash is step.input_digest owned by Wave 1), A6 (W2.T7/W2.T11: targeted tests for approval lifecycle and downstream authorization added).
 
 ---
 
@@ -210,7 +207,11 @@ W2.T7.3 — `resolve_bound(approved)` calls `ApprovalService.resolve` (Phase 1);
 W2.T7.4 — Rejection transitions spec to `"revision_required"` and writes `spec_approval_rejected` audit event.
 W2.T7.5 — Concurrent resolution test: two simultaneous `resolve_standalone` calls → exactly one succeeds; the other raises `APPROVAL_ALREADY_RESOLVED`.
 W2.T7.6 — `is_implementation_authorized` returns `False` when no approved version exists.
-W2.T7.7 — `is_implementation_authorized` returns `False` when the approved version's digest does not match current artifacts.
+W2.T7.7 — `is_implementation_authorized` returns `False` when `verify_digest` returns `False` for the approved version.
+W2.T7.16 — **A3/A6 — Standalone path approved-not-consumed:** `is_implementation_authorized` returns `False` when `SpecificationVersion.status = "approved"` but `specification_approval_requests.consumed_at IS NULL` (approval was set up but consume_atomic was never called). This guards against a state where `resolve_standalone` was called but the transaction rolled back after setting spec status.
+W2.T7.17 — **A6 — Standalone path successfully consumed:** `is_implementation_authorized` returns `True` when `SpecificationVersion.status = "approved"`, `verify_digest` passes, and `consumed_at IS NOT NULL`.
+W2.T7.18 — **A6 — Workflow-bound path approved:** `is_implementation_authorized` returns `True` when `SpecificationVersion.status = "approved"` and `verify_digest` passes; it does NOT require checking `authorization_expires_at` or `consumed_at` on `approval_requests` (those are Wave 1's gate at dispatch time).
+W2.T7.19 — **A6 — No implementation authorization before approval gate:** A test verifies that `is_implementation_authorized` returns `False` for a spec that is in `"ready_for_approval"` state (approval requested but not yet resolved). No downstream Wave 3 invocation can proceed.
 W2.T7.8 — `APPROVAL_EXPIRED` and `APPROVAL_ALREADY_RESOLVED` for bound approvals originate from Wave 1 `ApprovalService`; test verifies via mock.
 W2.T7.9 — `APPROVAL_EXPIRED` and `APPROVAL_ALREADY_RESOLVED` for standalone approvals are raised by `SpecificationApprovalRepository`; test verifies both expiry (past `expires_at`) and double-consume scenarios.
 W2.T7.10 — Approving an already-approved version returns HTTP 409 `SPEC_APPROVED_NO_OVERWRITE`.
@@ -312,6 +313,13 @@ W2.T11.10 — MCP compatibility test: mocked subprocess verifies `MCPClientAdapt
 W2.T11.11 — `mypy --strict src/devflow_api/providers/ src/devflow_api/services/specification*.py src/devflow_api/repositories/specification*.py src/devflow_api/routers/specification*.py` exits with code 0.
 W2.T11.12 — `ruff check src/` exits with code 0 on all new Wave 2 files.
 W2.T11.13 — **F-FIN targeted tests:** (a) A test verifies `consume_atomic` raises `ApprovalBindingMismatch` when `expected_parameters_hash` does not match the stored hash. (b) A test verifies `consume_atomic` raises `ApprovalAlreadyResolvedError` when two concurrent calls attempt to consume the same standalone approval. (c) A test verifies that passing `protected_operation = "specification_approval"` (not `"approve_specification"`) to a workflow step template passes `WorkflowTemplate` Pydantic validation; passing `"approve_specification"` raises `ValidationError`. (d) A test verifies that standalone spec audit events are written with `workflow_run_id = None` to `WorkflowAuditLog`. (e) A test verifies `SpecificationRecoveryService.recover()` is idempotent over two calls.
+W2.T11.14 — **A6 — Approval lifecycle targeted tests:**
+  (a) **Approved-not-consumed (standalone):** A `SpecificationVersion` with `status = "approved"` and `consumed_at IS NULL` on the linked `specification_approval_requests` row causes `is_implementation_authorized` to return `False`.
+  (b) **Successfully consumed (standalone):** After `resolve_standalone` completes, `consumed_at IS NOT NULL`, `SpecificationVersion.status = "approved"`, and `is_implementation_authorized` returns `True`.
+  (c) **Expired authorization (workflow-bound):** A test mocks `ApprovalService.resolve` to simulate an expired approval (`ApprovalExpiredError`); verifies `resolve_bound` propagates the error and does NOT transition spec status.
+  (d) **Failed or cancelled protected dispatch:** A test verifies that after `dispatch_protected_txn` raises `ApprovalNotConsumableError`, the orchestrator calls `request_bound_approval` again (re-gates); `is_implementation_authorized` still returns `False` because spec status is not `"approved"`.
+  (e) **Replay / duplicate dispatch:** A test verifies the orchestrator's `_advance` idempotency: if an `ApprovalRequest` with `status = "approved"` and `consumed_at IS NULL` already exists for the step, `_advance` returns the same `DispatchPlan.approval_id` without creating a duplicate.
+  (f) **No downstream authorization before gate:** A test verifies `is_implementation_authorized` returns `False` when spec is in `"ready_for_approval"` state.
 
 ---
 
@@ -339,6 +347,33 @@ W2.T13.4 — Recovery does not auto-trigger new generation or review.
 W2.T13.5 — All audit events written by recovery pass `workflow_run_id = None` to `AuditLogRepository.log_event`.
 W2.T13.6 — `SpecificationRecoveryService.recover()` is registered in the FastAPI lifespan startup handler; `RecoveryService.recover()` runs first.
 W2.T13.7 — `mypy --strict` passes for the recovery module.
+
+---
+
+### W2.T14 — `ExecutorRegistry` extension and Wave 2 executor registration
+
+**Area:** Design §6.1
+**Size:** S
+**Depends on:** W2.T4, W2.T5, W2.T8.
+
+**Description:**
+
+**A1/A2 — Source-verified prerequisite.** `ExecutorRegistry.register()` currently enforces a hardcoded guard `if executor.identifier.id != "mock": raise ExecutorSelectionError`. This guard must be extended to allow Wave 2 executors before `SpecGeneratorExecutor` or `SpecReviewerExecutor` can be registered.
+
+Extend `src/devflow_api/executors/registry.py` `ExecutorRegistry.register()` to accept any executor whose `identifier.id` is in a configured allowlist (or simply remove the mock-only guard while keeping uniqueness enforcement). Then implement and register:
+
+- `SpecGeneratorExecutor` in `src/devflow_api/executors/specification_generator.py`
+- `SpecReviewerExecutor` in `src/devflow_api/executors/specification_reviewer.py`
+
+No `SpecApproverExecutor` is required. The Wave 1 orchestrator handles the approval gate automatically for any step with `approvable = True` and `protected_operation = "specification_approval"`.
+
+**Acceptance Criteria:**
+W2.T14.1 — `ExecutorRegistry.register(SpecGeneratorExecutor())` succeeds without raising `ExecutorSelectionError`.
+W2.T14.2 — `ExecutorRegistry.register(SpecReviewerExecutor())` succeeds without raising `ExecutorSelectionError`.
+W2.T14.3 — `ExecutorRegistry.select("spec_generator", ...)` returns a `SpecGeneratorExecutor` instance; `select("spec_reviewer", ...)` returns a `SpecReviewerExecutor` instance.
+W2.T14.4 — `ExecutorRegistry.select("mock", ...)` still returns a `MockExecutor` (backward compatibility preserved).
+W2.T14.5 — A test verifies that a workflow step template with `executor_id = "spec_generator"` and `approvable = True` and `protected_operation = "specification_approval"` passes `WorkflowTemplate` validation (this is the approval-gate pattern; no separate approver executor is needed).
+W2.T14.6 — `mypy --strict` passes for the registry and both new executor modules.
 
 ---
 
@@ -383,6 +418,8 @@ Wave 1 baseline (b3b37ff)
     │                                                                                                │
     │                                     W2.T5 (ReviewService) ────────────────────────────────────┤
     │                                                                                                │
+    │                        W2.T4 + W2.T5 ──── W2.T14 (ExecutorRegistry + Executors) ─────────────┤
+    │                                                                                                │
     │                                              All ──── W2.T9 (Routers) ───────────────────────┤
     │                                                              │                                 │
     │                                                              └── W2.T10 (UI) ─────────────────┤
@@ -411,3 +448,4 @@ Wave 1 baseline (b3b37ff)
 | W2.T11 | REQ-W2.9.1 – W2.9.9 (security/reliability test coverage) |
 | W2.T12 | All (quality gate verification) |
 | W2.T13 | REQ-W2.9.9 (SpecificationRecoveryService) |
+| W2.T14 | Design §6.1 (ExecutorRegistry extension, SpecGeneratorExecutor, SpecReviewerExecutor) |

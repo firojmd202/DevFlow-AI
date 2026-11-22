@@ -1,19 +1,17 @@
 # DevFlow AI — Phase 2 Wave 2: AI Specification Generation and Review Design
 
-**Version:** 1.4.0
-**Status:** Draft — Implementation-contract aligned (corrections C1–C6)
+**Version:** 1.5.0
+**Status:** Draft — Approval integration clarified (corrections A1–A6)
 **Scope:** Phase 2 Wave 2 — AI Specification Generation and Review
 **Branch:** `feature/phase2-wave2-ai-spec-generation`
 **Base commit:** `b3b37ff` (Wave 1 implementation merged, develop HEAD)
 **Last Updated:** 2026-11-18
-**Companion:** `requirements.md` (v1.4.0), `tasks.md` (v1.4.0).
+**Companion:** `requirements.md` (v1.5.0), `tasks.md` (v1.5.0).
 
 **Version history:**
-- v1.0.0 — 2026-11-18 — Initial Wave 2 design draft.
-- v1.1.0 — 2026-11-18 — Review findings addressed: F1–F17.
-- v1.2.0 — 2026-11-18 — Review findings addressed: F-NEW-1 through F-NEW-5.
-- v1.3.0 — 2026-11-18 — Integration corrections: F-FIN-1 through F-FIN-8.
-- v1.4.0 — 2026-11-18 — Implementation-contract alignment: C1 (standalone approval consumption and spec-status transition made atomic in one `BEGIN IMMEDIATE`; transaction ownership explicit in §3.9.1), C2 (workflow-bound approval: human-decision resolution and authorization dispatch separated; `resolve_bound` transitions spec state at `ApprovalService.resolve()` return; `consumed_at` CAS happens later at `dispatch_protected_txn`, not here), C3 (`APPROVAL_EXPIRY_SECONDS` replaced with `APPROVAL_TTL_SECONDS` throughout), C4 (readiness report reconciled to 7 tables / 15 indexes / 13 tasks), C5 (stale `workflow_id` prose reference removed from §3.9), C6 (MCP SDK 2.x prerequisite retained unchanged).
+- v1.0.0–v1.3.0 — See prior version history.
+- v1.4.0 — 2026-11-18 — Implementation-contract alignment: C1–C6.
+- v1.5.0 — 2026-11-18 — Approval integration clarification: A1 (SpecApproverExecutor does not exist in Wave 1 registry; hardcoded mock-only guard confirmed; claim removed), A2 (SpecGeneratorExecutor and SpecReviewerExecutor are Wave 2 implementation tasks requiring ExecutorRegistry.register() extension), A3 (is_implementation_authorized aligned to actual orchestrator approval-gate query), A4 (workflow-bound parameters_hash is step.input_digest, not Wave 2 spec hash), A5 (W2.T14 task added for ExecutorRegistry extension and new executor registration), A6 (targeted tests added for approval lifecycle and downstream authorization).
 
 ---
 
@@ -428,13 +426,25 @@ else:  -- rejected
   COMMIT
 ```
 
-**Wave 1 consumption note:** When a `SpecApproverExecutor` subsequently dispatches the protected workflow step, `WorkflowStepRunRepository.dispatch_protected_txn` calls `ApprovalRepository.consume_atomic` with `operation="specification_approval"`. This is the Wave 1 approval authorization check at execution time. Wave 2 does not call or replicate this; it is entirely owned by Wave 1 infrastructure. The spec transition to `"approved"` is Wave 2's concern; the step dispatch authorization is Wave 1's concern.
+**Wave 1 consumption note (A4):** When the Wave 1 orchestrator dispatches a workflow step with `approvable = True`, it queries for an `ApprovalRequest` with `parameters_hash == step.input_digest` (the step's canonical input hash, computed by `ApprovalService.request_bound_approval` internally). The orchestrator then calls `WorkflowStepRunRepository.dispatch_protected_txn` which atomically sets `consumed_at`. This is entirely owned by Wave 1; Wave 2 does not call or replicate it. The approval step in a workflow template does not require a custom `SpecApproverExecutor` — any executor on a step with `approvable = True` and `protected_operation = "specification_approval"` triggers this mechanism.
 
 `is_implementation_authorized(request_id) → bool`:
-- Loads the approved `SpecificationVersion` for `request_id`.
-- Returns `False` if no approved version exists.
-- Returns `False` if `SpecificationVersionRepository.verify_digest(version_id)` returns `False`.
-- Returns `True` only when both checks pass.
+
+**A3 — Aligned to actual orchestrator invariants.** The orchestrator dispatches a protected step only when ALL of the following are true (source-verified from `orchestration.py` `_advance` and `_dispatch_and_execute`):
+1. `ApprovalRequest.status == "approved"`
+2. `ApprovalRequest.consumed_at IS NULL`
+3. `ApprovalRequest.authorization_expires_at > now()`
+4. `ApprovalRequest.parameters_hash == step.input_digest`
+5. `ApprovalRequest.actor_id == Settings.LOCAL_OPERATOR_ID`
+6. `ApprovalRequest.operation == definition.protected_operation`
+
+`is_implementation_authorized` checks the Wave 2 side of this gate:
+- A `SpecificationVersion` with `status = "approved"` exists for `request_id`.
+- `SpecificationVersionRepository.verify_digest(version_id)` returns `True` (content unchanged since approval).
+- For the workflow-bound path: does NOT check `consumed_at` or `authorization_expires_at` on `approval_requests` — those are enforced by the Wave 1 orchestrator at dispatch time.
+- For the standalone path: checks that `consumed_at IS NOT NULL` on `specification_approval_requests` (meaning the standalone approval was actually consumed, not just resolved).
+
+Returns `True` only when both checks pass. For the standalone path, the full invariant is: `spec_standalone_approval_id IS NOT NULL` and `consumed_at IS NOT NULL` on the linked `specification_approval_requests` row.
 
 **Invariant:** `SpecificationApprovalService` MUST NOT create `ApprovalRequest` rows in the `approval_requests` table directly. The standalone path uses `SpecificationApprovalRepository` exclusively. The workflow-bound path goes through `ApprovalService`.
 
@@ -640,21 +650,46 @@ Wave 2 services integrate with Wave 1 via the `Executor` Protocol.
 
 ### 6.1 New Executor Registrations
 
-Two new executors are registered in `ExecutorRegistry`:
+**A1/A2 — Source-verified facts about `ExecutorRegistry`:**
+
+`src/devflow_api/executors/registry.py` `ExecutorRegistry.register()` has a hardcoded guard:
+```python
+def register(self, executor: Executor) -> None:
+    if executor.identifier.id != "mock":
+        raise ExecutorSelectionError("EXECUTOR_NOT_FOUND")
+    self._executors[executor.identifier.id] = executor
+```
+
+Only `MockExecutor` is currently registered. `SpecGeneratorExecutor`, `SpecReviewerExecutor`, and `SpecApproverExecutor` do NOT exist. The `register()` guard must be extended as a Wave 2 implementation task (W2.T14) before any new executor can be registered. The statement in earlier versions that "these executors exist in the Wave 1 registry" was incorrect.
+
+**Wave 2 must implement and register these three executors (W2.T14):**
 
 **`SpecGeneratorExecutor`** (executor_id: `"spec_generator"`):
 - `supports(tool_selection)` returns `True` when `tool_selection.executor_id == "spec_generator"`.
 - `execute(context) → StepExecutionResult`: calls `SpecificationGenerationService.generate(context.inputs["spec_request_id"])`.
 - Returns artifacts in `output_json["artifacts"]` and `artifact_refs_json`.
+- Registered in `ExecutorRegistry` after W2.T14 extends `register()` to allow non-mock executors.
 
 **`SpecReviewerExecutor`** (executor_id: `"spec_reviewer"`):
 - `execute(context) → StepExecutionResult`: calls `SpecificationReviewService.review(context.inputs["spec_version_id"])`.
 - Returns `output_json["finding_count_by_severity"]`.
 
-**`SpecApproverExecutor`** (executor_id: `"spec_approver"`):
-- **C2 note:** This executor handles the protected-dispatch phase of the workflow-bound approval path. When a workflow step with `approvable = True` and `protected_operation = "specification_approval"` is dispatched, Wave 1 calls `WorkflowStepRunRepository.dispatch_protected_txn`, which consumes the `ApprovalRequest.consumed_at` atomically at execution time. This executor exists in the Wave 1 registry; Wave 2 does not need to implement it. It is documented here to clarify the two-phase model: `resolve_bound` handles the human-decision phase; `dispatch_protected_txn` handles the authorization-consumption phase.
+**Approval gate for the workflow-bound path — no separate `SpecApproverExecutor`:**
 
-Both executors:
+The Wave 1 orchestrator's `_advance` method (source-verified in `src/devflow_api/orchestration.py`) handles the approval gate automatically for any step with `approvable = True`. When such a step reaches `READY` and no valid approval exists, `_advance` calls `request_bound_approval` itself and skips dispatch. When a valid approval is found, it populates `DispatchPlan.approval_id` and `_dispatch_and_execute` calls `dispatch_protected_txn` to consume it.
+
+**A4 — `parameters_hash` for workflow-bound approval:**
+
+The orchestrator queries for an `ApprovalRequest` using `parameters_hash == step.input_digest` (source-verified: `orchestration.py` `_advance` method, line `ApprovalRequest.parameters_hash == step.input_digest`). The `step.input_digest` is `canonical_hash(inputs)` where `inputs` are the step's resolved input JSON. This is **not** the same as the Wave 2 `sha256(f"{version_id}:{content_digest}")` formula used for standalone approvals.
+
+For the workflow-bound path, `request_bound_approval` (source-verified in `src/devflow_api/services/approval.py`) derives `parameters_hash` internally from the step template: it uses `canonical_hash(json.loads(step.inputs_json or "{}"))`. Wave 2 does not compute or supply this value; the Wave 1 orchestrator and `ApprovalService` handle it entirely.
+
+**Summary:**
+- No `SpecApproverExecutor` is needed. The existing Wave 1 approval gate mechanism handles protected dispatch for any `approvable = True` step.
+- `SpecGeneratorExecutor` and `SpecReviewerExecutor` are non-approvable steps (they execute AI generation and review; they are not approval steps).
+- The approval gate step, if used in a workflow, is a step with `executor_id = "mock"` (or any future executor) with `approvable = True` and `protected_operation = "specification_approval"`. Wave 2 implementation does not need a new approval executor.
+
+All executors:
 - Do NOT import repositories, services, or models directly (consistent with Wave 1 §1 principle 3).
 - Receive an `ExecutionContext` with inputs from the step template.
 - Return a `StepExecutionResult`; the orchestrator persists the result.
