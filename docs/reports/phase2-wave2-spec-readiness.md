@@ -1,7 +1,7 @@
 # DevFlow AI — Phase 2 Wave 2: Specification Readiness Report
 
-**Version:** 1.0.0
-**Status:** Draft — Awaiting ChatGPT Review
+**Version:** 1.1.0
+**Status:** Draft — Review findings addressed (F1–F7, F9, F10, F12, F13, F15, F17) — Awaiting Second Review
 **Branch:** `feature/phase2-wave2-ai-spec-generation`
 **Base commit:** `b3b37ff` (Wave 1 implementation merged, develop HEAD)
 **Last Updated:** 2026-11-18
@@ -12,9 +12,9 @@
 
 | File | Version | Status |
 |---|---|---|
-| `.kiro/specs/phase2-wave2-ai-specification-generation/requirements.md` | 1.0.0 | Draft |
-| `.kiro/specs/phase2-wave2-ai-specification-generation/design.md` | 1.0.0 | Draft |
-| `.kiro/specs/phase2-wave2-ai-specification-generation/tasks.md` | 1.0.0 | Draft |
+| `.kiro/specs/phase2-wave2-ai-specification-generation/requirements.md` | 1.1.0 | Draft — findings addressed |
+| `.kiro/specs/phase2-wave2-ai-specification-generation/design.md` | 1.1.0 | Draft — findings addressed |
+| `.kiro/specs/phase2-wave2-ai-specification-generation/tasks.md` | 1.1.0 | Draft — findings addressed |
 | `docs/reports/phase2-wave2-mcp-compatibility-assessment.md` | 1.0.0 | Draft |
 | `docs/planning/phase2-roadmap.md` | 2.2.0 | Updated (Wave 2 decisions recorded) |
 
@@ -24,9 +24,9 @@
 
 | File | Lines |
 |---|---|
-| `.kiro/specs/phase2-wave2-ai-specification-generation/requirements.md` | 513 |
-| `.kiro/specs/phase2-wave2-ai-specification-generation/design.md` | 715 |
-| `.kiro/specs/phase2-wave2-ai-specification-generation/tasks.md` | 255 |
+| `.kiro/specs/phase2-wave2-ai-specification-generation/requirements.md` | 684 |
+| `.kiro/specs/phase2-wave2-ai-specification-generation/design.md` | 1030 |
+| `.kiro/specs/phase2-wave2-ai-specification-generation/tasks.md` | 358 |
 | `docs/reports/phase2-wave2-spec-readiness.md` | (this file) |
 | `docs/reports/phase2-wave2-mcp-compatibility-assessment.md` | ~160 |
 | `docs/planning/phase2-roadmap.md` | (updated, Wave 2 section) |
@@ -56,7 +56,7 @@ Every requirement (REQ-W2.x.y) has numbered acceptance criteria. No requirement 
 
 | Decision | Rationale |
 |---|---|
-| `OllamaProvider` wraps existing `OllamaAdapter` via the `AIProvider` Protocol | Avoids duplicating the HTTP client; reuses `Settings.OLLAMA_BASE_URL` |
+| `OllamaProvider` communicates directly with Ollama HTTP API via `httpx.AsyncClient` (identical pattern to `OpenAIProvider`); does NOT use `OllamaAdapter` for generation calls | `OllamaAdapter.generate()` discards the HTTP response body and returns only `OllamaResponse(stub=False)`, which does not expose `response`, `eval_count`, or `prompt_eval_count`. `OllamaProvider` MUST read the full response to populate `ProviderResponse`; direct httpx is the only viable path. `OllamaAdapter` remains for health-check pings only. |
 | `OpenAIProvider` uses `httpx.AsyncClient` directly, no openai SDK dependency | Avoids mandatory proprietary dependency; httpx already in `requirements/base.txt` |
 | `ProviderFactory.create()` is the single provider instantiation point | Enforces Ollama-default and OpenAI-only-when-explicit at construction time |
 | `MCPClientAdapter` wraps existing `MCPClient`; adds schema validation and audit | Reuses existing tested MCP transport; adds Wave 2 concerns at the adapter layer |

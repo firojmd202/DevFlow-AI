@@ -1,15 +1,16 @@
 # DevFlow AI — Phase 2 Wave 2: AI Specification Generation and Review Design
 
-**Version:** 1.0.0
-**Status:** Draft
+**Version:** 1.1.0
+**Status:** Draft — Review findings addressed (F1–F17)
 **Scope:** Phase 2 Wave 2 — AI Specification Generation and Review
 **Branch:** `feature/phase2-wave2-ai-spec-generation`
 **Base commit:** `b3b37ff` (Wave 1 implementation merged, develop HEAD)
 **Last Updated:** 2026-11-18
-**Companion:** `requirements.md` (v1.0.0), `tasks.md` (v1.0.0).
+**Companion:** `requirements.md` (v1.1.0), `tasks.md` (v1.1.0).
 
 **Version history:**
 - v1.0.0 — 2026-11-18 — Initial Wave 2 design draft.
+- v1.1.0 — 2026-11-18 — Review findings addressed: F1 (OllamaProvider uses httpx directly, not OllamaAdapter), F2 (audit payload_json keys, no new columns on workflow_audit_log), F3 (standalone approval path), F4 (timeout conflict resolved), F5 (_authorized context manager pattern), F6 (cancellation routes added), F7 (Under Review transition rule unified), F8 (output schemas defined), F9 (parameters_hash canonical definition), F10 (recovery status transitions), F12 (HTTP 499 replaced with 409), F13 (SpecificationVersion creation timing), F14 (MCP schema registration), F15 (content_digest canonical separator), F17 (W2.T4 no longer depends on W2.T2).
 
 ---
 
@@ -122,11 +123,16 @@ class AIProvider(Protocol):
 
 **Location:** `src/devflow_api/providers/ollama_provider.py`
 
-Wraps the existing `OllamaAdapter` (`src/devflow_api/adapters/live/ollama.py`) but presents the `AIProvider` interface. `OllamaAdapter` sends `POST /api/generate` with `{"model": ..., "prompt": ..., "stream": false}`. `OllamaProvider` maps the response to `ProviderResponse`, extracting `eval_count` (completion tokens) and `prompt_eval_count` (prompt tokens) from the Ollama API response where available.
+**F1 resolution:** `OllamaAdapter` (`src/devflow_api/adapters/live/ollama.py`) discards the HTTP response body and returns only `OllamaResponse(stub: bool)`, which does not expose `response`, `eval_count`, or `prompt_eval_count`. Therefore `OllamaProvider` MUST NOT use `OllamaAdapter` for AI generation calls. Instead, `OllamaProvider` uses `httpx.AsyncClient` directly — the same approach as `OpenAIProvider` — to call `POST {OLLAMA_BASE_URL}/api/generate` and read the full JSON response body. This is consistent with `OpenAIProvider` design (§3.3) and avoids a dependency on the stub-returning adapter.
+
+`OllamaAdapter` MAY still be used by `OllamaProvider.check_availability()` (which calls the health endpoint and only needs a status code), but MUST NOT be used for `generate()`.
+
+**F4 resolution (timeout):** `Settings.OLLAMA_TIMEOUT_SECONDS` (default 30, existing setting) governs the existing `OllamaAdapter` HTTP connection/idle timeout. `Settings.AI_REQUEST_TIMEOUT_SECONDS` (default 120, new Wave 2 setting) governs the total wall-clock time budget for an AI generation call in `OllamaProvider.generate()`. Both may apply simultaneously: `httpx.AsyncClient(timeout=httpx.Timeout(connect=30, read=120))` using `AI_REQUEST_TIMEOUT_SECONDS` for the read timeout. If `AI_REQUEST_TIMEOUT_SECONDS` is exceeded, `asyncio.timeout` raises `TimeoutError` which is wrapped to `ProviderTimeoutError`. `OLLAMA_TIMEOUT_SECONDS` is NOT used as the generation timeout; it is only used for connection establishment and health checks.
 
 **Key behaviors:**
-- Uses `Settings.OLLAMA_BASE_URL` and `Settings.OLLAMA_TIMEOUT_SECONDS` from existing settings.
-- Wraps `httpx.ConnectError` → `ProviderUnavailableError`; `httpx.TimeoutException` → `ProviderTimeoutError`.
+- Uses `Settings.OLLAMA_BASE_URL` from existing settings; calls `POST /api/generate` with `{"model": ..., "prompt": ..., "stream": false}`.
+- Maps the full JSON response body to `ProviderResponse`, extracting `response` (content), `eval_count` (completion tokens), and `prompt_eval_count` (prompt tokens).
+- Wraps `httpx.ConnectError` → `ProviderUnavailableError`; `asyncio.TimeoutError` (from `asyncio.timeout`) → `ProviderTimeoutError`.
 - Retries on `ProviderUnavailableError` with transient flag only (REQ-W2.1.7).
 - Never contacts OpenAI under any condition.
 
@@ -169,8 +175,32 @@ A thin wrapper around the existing `MCPClient` (`src/devflow_api/adapters/mcp_cl
 - **Tool schema validation:** Each registered MCP tool has a JSON schema; arguments are validated before the subprocess is started.
 - **Result normalization:** Converts `MCPToolResult` to `ContextChunk(content: str, server: str, tool: str, required: bool, truncated: bool)`.
 - **Audit logging:** Writes `mcp_tool_invoked` to `WorkflowAuditLog` with `server_name`, `tool_name`, `argument_hash` (SHA-256 of JSON-serialized arguments), `result_status`.
-- **Credential isolation:** Passes `Settings` to `MCPClient._resolve_env`; never logs raw env values.
+- **Credential isolation:** Passes `Settings` to `MCPClient._resolve_env` via the `MCPClient` constructor; never logs raw env values.
 - **SDK version isolation:** All `mcp.*` imports are confined to `MCPClient`; `MCPClientAdapter` imports only `MCPClient` and `MCPToolResult`.
+
+**F5 resolution — Required calling convention for `MCPClient.call_tool`:**
+`MCPClient.call_tool` raises `MCPPermissionError` unless the caller has first entered the `MCPClient._authorized(server_name, tool_name, arguments, on_launch)` async context manager, which sets the internal `ContextVar`. The `MCPClientAdapter.retrieve_context` method MUST therefore wrap every `call_tool` invocation as follows:
+
+```python
+async def retrieve_context(
+    self,
+    server_name: str,
+    tool_name: str,
+    arguments: dict[str, object],
+) -> ContextChunk:
+    # Validate arguments schema before entering the authorization context
+    self._validate_schema(server_name, tool_name, arguments)
+    async with self._mcp_client._authorized(
+        server_name, tool_name, arguments, on_launch=self._on_launch_hook
+    ):
+        result = await self._mcp_client.call_tool(server_name, tool_name, arguments)
+    return self._normalize(result, server_name, tool_name)
+```
+
+`on_launch` is an async no-op callback (`async def _on_launch_hook() -> None: pass`) unless a test hook is registered. This calling convention is not optional; omitting the `_authorized` context manager causes every invocation to raise `MCPPermissionError` regardless of allowlist configuration.
+
+**F14 resolution — Tool schema registration:**
+Tool JSON schemas are registered via `MCPServerConfig.tool_schemas: dict[str, dict[str, object]]` — a mapping from tool name to its JSON Schema object. This field is added to `MCPServerConfig` in Wave 2 (or supplied as a parallel `MCPClientAdapter`-level registry). Schema registration is static (defined in configuration, not fetched from the MCP server). If no schema is registered for a tool, the adapter applies permissive validation (any `dict` is accepted); this behavior is documented in the adapter and can be overridden to reject-on-missing-schema via `Settings.MCP_STRICT_SCHEMA_VALIDATION` (default `False`).
 
 **Interface:**
 
@@ -192,21 +222,31 @@ class MCPClientAdapter:
 
 Orchestrates the generation pipeline:
 
-1. Load `SpecificationRequest` from repository.
-2. Create `GenerationAttempt` row (`status = "pending"`).
+**F13 resolution — SpecificationVersion creation timing:** The initial `SpecificationVersion` row (version 1, `status = "draft"`) is created **at request creation time** (step 0, before any generation is triggered). This guarantees that `GenerationAttempt.specification_version_id` can always be set when the attempt row is created in step 2 (the version row already exists). The creation sequence is therefore:
+
+0. _(At spec request creation, not generation trigger)_ Create `SpecificationVersion(version=1, status="draft")`; this row is created atomically in the same transaction as `SpecificationRequest` creation.
+
+Then, when generation is triggered:
+
+1. Load `SpecificationRequest` from repository; resolve the current `SpecificationVersion` (version = `request.current_version`, status must be `"draft"`).
+2. Create `GenerationAttempt` row (`status = "pending"`, `specification_version_id` set to the version row from step 1).
+3. Return HTTP 202; schedule background task.
+
+Background task continues:
+
 3. Retrieve MCP context via `MCPClientAdapter` (optional; non-critical failures are tolerated per REQ-W2.3.4).
 4. Build prompt from fixed template + sanitized inputs (REQ-W2.9.1).
 5. Enforce context size limit (REQ-W2.4.7); truncate if necessary.
 6. Update `GenerationAttempt.status = "running"`.
-7. Call `AIProvider.generate(prompt)` with timeout enforcement.
-8. Validate output against `SpecificationOutputSchema` (REQ-W2.4.6).
+7. Call `AIProvider.generate(prompt)` with `asyncio.timeout(AI_REQUEST_TIMEOUT_SECONDS)`.
+8. Validate output against `SpecificationOutputSchema` (REQ-W2.4.6; defined in §11.3).
 9. Persist `SpecificationArtifact` rows (one per artifact type).
-10. Create `SpecificationVersion` with `content_digest`.
-11. Transition `SpecificationRequest.status` to `Generated`.
+10. Compute and set `SpecificationVersion.content_digest` via `SpecificationVersionRepository.compute_and_set_digest`.
+11. Transition `SpecificationVersion.status` to `"generated"` (CAS).
 12. Update `GenerationAttempt.status = "succeeded"`.
 13. Write audit event `spec_generated`.
 
-On any failure: set `GenerationAttempt.status = "failed"`, write `error_code`, write `generation_failed` audit event.
+On any failure: set `GenerationAttempt.status = "failed"`, write `error_code`, write `generation_failed` audit event. Also transition `SpecificationRequest.status` back to `"draft"` and `SpecificationVersion.status` back to `"draft"` if either was advanced (see §10 recovery and REQ-W2.9.9 / finding F10).
 
 **Prompt construction (security):**
 ```
@@ -256,9 +296,12 @@ Each check produces zero or more `ReviewFinding` rows with `source = "determinis
 **Persistence:**
 - Create `ReviewAttempt` before Phase 1.
 - Update `ReviewAttempt` after both phases; set `finding_count_by_severity`.
-- Transition `SpecificationVersion.status`:
-  - `Critical` or `High` findings → `Revision Required`.
-  - No `Critical` or unacknowledged `High` findings → `Ready for Approval`.
+- Transition `SpecificationVersion.status` using the **unified rule (F7)**:
+  - Any `Critical` finding → `Revision Required` (no acknowledgment path avoids this).
+  - No `Critical` findings → `Ready for Approval` (even if `High` findings exist; `High` findings do NOT force `Revision Required` but DO block the approval gate until acknowledged, per REQ-W2.5.4 and REQ-W2.6.1).
+  - User may also manually trigger `Under Review → Revision Required` regardless of findings.
+
+This rule is stated identically in design §3.7, REQ-W2.6.1, and REQ-W2.5.4. Implementers MUST NOT apply any other rule.
 
 ### 3.8 `SpecificationVersionRepository`
 
@@ -267,10 +310,12 @@ Each check produces zero or more `ReviewFinding` rows with `source = "determinis
 Manages the `specification_versions` and `specification_artifacts` tables.
 
 **Key methods:**
-- `create_version(request_id, version_number) → SpecificationVersion`
+- `create_request(...)` — creates `SpecificationRequest` and an initial `SpecificationVersion(version=1, status="draft")` atomically in one `BEGIN IMMEDIATE` transaction (F13 fix).
+- `get_request`, `update_request`
+- `create_version(request_id, version_number) → SpecificationVersion` — creates additional versions on revision.
 - `transition_status(version_id, from_status, to_status)` — CAS guard with `BEGIN IMMEDIATE`; raises `InvalidSpecTransitionError` on mismatch.
-- `compute_and_set_digest(version_id)` — SHA-256 of `requirements_text + design_text + tasks_text` (canonical concatenation); called on `Generated` transition.
-- `verify_digest(version_id) → bool` — recomputes and compares; called before `Approved` transition.
+- `compute_and_set_digest(version_id)` — **F15 fix:** canonical separator is `\n---\n`; computes `sha256((requirements_text + "\n---\n" + design_text + "\n---\n" + tasks_text).encode("utf-8")).hexdigest()`; this definition is used identically here and in task W2.T6.
+- `verify_digest(version_id) → bool` — recomputes using the same separator and compares; called before `Approved` transition.
 - `list_versions(request_id) → list[SpecificationVersion]`
 - `get_artifact(version_id, artifact_type) → SpecificationArtifact`
 - `save_artifact(version_id, artifact_type, content) → SpecificationArtifact`
@@ -286,8 +331,10 @@ Delegates to Wave 1 `ApprovalService` for all approval mechanics; adds spec-spec
 **Key methods:**
 
 `request_approval(version_id, actor_id) → ApprovalRequest`:
-- Calls `ApprovalService.request_bound_approval(...)` with `operation = "approve_specification"`, `parameters_hash = sha256(version_id + content_digest)`.
+- Calls `ApprovalService.request_bound_approval(...)` with `operation = "approve_specification"`, **`parameters_hash` computed as the canonical definition (F9): `hashlib.sha256(f"{version_id}:{content_digest}".encode("utf-8")).hexdigest()`** — colon separator between `version_id` (integer, str-formatted) and `content_digest` (64-char hex string). This definition is canonical; it MUST be used identically in REQ-W2.7.1 and task W2.T7.
+- For the **standalone path (F3)**: when `SpecificationRequest.workflow_id IS NULL` (no linked workflow step), `SpecificationApprovalService.request_approval` calls `ApprovalService.request_standalone_approval(operation, parameters_hash, actor_id, expires_at)` — a new method on `ApprovalService` that creates an `ApprovalRequest` with `workflow_run_id = NULL` and `workflow_step_run_id = NULL`. This path is defined here because Phase 2 `SpecificationApprovalService` MUST NOT create `ApprovalRequest` rows directly. `ApprovalService.request_standalone_approval` is added in W2.T7 as a minimal additive extension; it MUST reuse the same `BEGIN IMMEDIATE` insertion logic as `request_bound_approval` and MUST NOT duplicate approval validity or TTL logic.
 - Transitions `SpecificationVersion.status` to `Ready for Approval`.
+- For the **workflow-bound path**: when `SpecificationRequest.workflow_id` is set and the spec is running inside a Wave 1 workflow step with a `workflow_step_run_id`, the existing `ApprovalService.request_bound_approval(run_id, step_run_id, operation, parameters_hash, actor_id, expires_at)` is used unchanged.
 
 `resolve(approval_id, decision, resolved_by) → None`:
 - Delegates to `ApprovalService.resolve(approval_id, decision, resolved_by)`.
@@ -314,14 +361,23 @@ GET    /{id}                                → 200 SpecificationRequestResponse
 PATCH  /{id}                                → 200 SpecificationRequestResponse
 DELETE /{id}                                → 204 (Cancelled)
 POST   /{id}/generate                       → 202 GenerationTaskResponse
+DELETE /{id}/generate                       → 200 CancelTaskResponse  (cancel in-progress generation)
 GET    /{id}/status                         → 200 StatusResponse
 POST   /{id}/review                         → 202 ReviewTaskResponse
+DELETE /{id}/review                         → 200 CancelTaskResponse  (cancel in-progress review)
 GET    /{id}/review/findings                → 200 ReviewFindingsResponse
 POST   /{id}/approve                        → 200 ApprovalResponse
 POST   /{id}/findings/{finding_id}/acknowledge → 200 AcknowledgeResponse
 GET    /{id}/versions                       → 200 VersionListResponse
 GET    /{id}/audit                          → 200 AuditEventsResponse
 ```
+
+**F6 — Cancellation routes:** `DELETE /{id}/generate` and `DELETE /{id}/review` cancel an in-progress or pending generation/review background task. The cancellation mechanism works as follows:
+- The route sets `GenerationAttempt.cancellation_requested = True` (a boolean column added to `generation_attempts` and `review_attempts` in migration 009; see §8.5/8.6 addendum).
+- The background task polls this flag after each major step (before the AI call, after the AI call, before persisting artifacts). On detecting `cancellation_requested = True`, the task transitions `status` to `"cancelled"` and exits without completing.
+- If the AI call is already in flight, the task cancels the `asyncio.timeout` context by cancelling the underlying task.
+- HTTP response: `200 {"status": "cancellation_requested"}` if the attempt was in `pending` or `running` state; `409 {"code": "TASK_NOT_CANCELLABLE"}` if already in a terminal state.
+- The cancelled status is `"cancelled"` (not a new status). No HTTP 499 is used anywhere in Wave 2 (see §4.3).
 
 ### 4.2 Request/Response Schemas
 
@@ -499,10 +555,14 @@ Provider calls (Ollama, OpenAI) may take 30–120 seconds for large prompts. HTT
 - Reads `GenerationAttempt.status` from the database.
 - Returns immediately without blocking.
 
-**Cancellation:**
-- Client sends `DELETE /{id}/status` or a cancel endpoint.
-- Background task checks a `CancellationToken` stored in `GenerationAttempt` and exits gracefully.
-- Status transitions to `cancelled`.
+**Cancellation (F6 — CancellationToken mechanism):**
+- Client sends `DELETE /{id}/generate` or `DELETE /{id}/review` (explicit cancellation routes; see §4.1).
+- The route sets `GenerationAttempt.cancellation_requested = True` (or `ReviewAttempt.cancellation_requested = True`) in the database (single `UPDATE` with `BEGIN IMMEDIATE`).
+- The background task checks `cancellation_requested` from the database at the following checkpoints: (a) before starting the AI call, (b) in the `asyncio.timeout` context if the AI call completes quickly, and (c) before persisting artifacts.
+- If the flag is set before the AI call starts, the task exits immediately with `status = "cancelled"`.
+- If the AI call is already in flight, the background task wraps it in `asyncio.wait_for` with a periodic cancellation-check loop; on detecting the flag it cancels the underlying coroutine.
+- Status transitions to `"cancelled"`. SpecificationRequest.status and SpecificationVersion.status are reverted as appropriate (same recovery path as failure).
+- HTTP response from the cancel route: `200 {"status": "cancellation_requested"}` if the attempt was in `"pending"` or `"running"` state; `409 {"code": "TASK_NOT_CANCELLABLE", "message": "..."}` if already terminal.
 
 **Note on FastAPI BackgroundTasks:** `BackgroundTasks` run after the response is sent in the same process; they do not survive process restart. For production resilience, a task queue (e.g., SQLite-backed queue) is recommended but is out of Wave 2 scope. Wave 2 uses `BackgroundTasks` for simplicity, with startup recovery handling tasks interrupted by restart (REQ-W2.9.9).
 
@@ -596,6 +656,7 @@ generation_attempts
   model_id                  TEXT NOT NULL
   prompt_hash               TEXT NOT NULL  -- SHA-256; never the prompt text
   context_truncated         INTEGER NOT NULL DEFAULT 0  -- boolean
+  cancellation_requested    INTEGER NOT NULL DEFAULT 0  -- boolean; set by DELETE /{id}/generate (F6)
   status                    TEXT NOT NULL DEFAULT 'pending'
                             CHECK(status IN ('pending','running','succeeded','failed','cancelled'))
   started_at                UTCDateTime
@@ -616,6 +677,7 @@ review_attempts
   provider_id                  TEXT NOT NULL
   model_id                     TEXT NOT NULL
   artifact_hash                TEXT NOT NULL  -- SHA-256 of concatenated artifact content
+  cancellation_requested       INTEGER NOT NULL DEFAULT 0  -- boolean; set by DELETE /{id}/review (F6)
   status                       TEXT NOT NULL DEFAULT 'pending'
                                CHECK(status IN ('pending','running','succeeded','failed','cancelled'))
   started_at                   UTCDateTime
@@ -647,25 +709,45 @@ review_findings
 
 ### 8.8 `AuditEvent` (reuses `WorkflowAuditLog`)
 
-Wave 2 audit events are written to the existing `workflow_audit_log` table (Wave 1). No new audit table is created. Wave 2 uses these `event_type` values:
+Wave 2 audit events are written to the existing `workflow_audit_log` table (Wave 1). No new audit table is created. The `workflow_audit_log` table has columns: `id`, `workflow_run_id`, `event_type`, `actor`, `payload_json`, `created_at`.
 
-| Event Type | Trigger |
-|---|---|
-| `spec_draft_created` | `SpecificationRequest` created |
-| `spec_request_updated` | Draft fields updated |
-| `spec_generation_started` | `GenerationAttempt` moves to `running` |
-| `spec_generated` | Artifacts saved, version created |
-| `spec_generation_failed` | `GenerationAttempt` failed |
-| `spec_review_started` | `ReviewAttempt` moves to `running` |
-| `spec_review_completed` | Review findings saved |
-| `spec_review_failed` | `ReviewAttempt` failed |
-| `critical_finding_acknowledged` | Critical finding acknowledged |
-| `spec_approval_requested` | `ApprovalRequest` created for spec |
-| `spec_approved` | Spec transitions to `Approved` |
-| `spec_approval_rejected` | Approval rejected |
-| `spec_approval_expired` | Approval expired |
-| `spec_revision_created` | New draft version started |
-| `mcp_tool_invoked` | MCP tool call (with argument_hash) |
+**F2 resolution:** REQ-W2.7.6 requires `specification_version_id` and `approval_id` to be recorded per audit event. These values are NOT added as new columns to `workflow_audit_log` (migration 009 does NOT alter this table). Instead, they are stored as named keys inside `payload_json`. The canonical key names for all Wave 2 audit events are:
+
+```json
+{
+  "specification_request_id": <int>,
+  "specification_version_id": <int | null>,
+  "approval_id": <int | null>,
+  "parameters_hash": "<hex>",
+  "content_digest": "<hex | null>",
+  "actor_id": "<str>",
+  ...event-specific fields...
+}
+```
+
+The `GET /api/v1/specification-requests/{id}/audit` route filters by `payload_json ->> 'specification_request_id' = {id}` using SQLite JSON functions (available in SQLite 3.38+, which is bundled with Python 3.12). This is documented as requiring SQLite 3.38 or later; the route handler MUST check this at startup and log a warning if not available.
+
+If migration 009 is later revised to add `specification_version_id` as a column to `workflow_audit_log` (a purely additive change to a Wave 1 table), that change is compatible with this design; the payload_json key MUST still be written for backward compatibility with consumers reading the JSON payload.
+
+Wave 2 uses these `event_type` values:
+
+| Event Type | Trigger | Stable `payload_json` keys |
+|---|---|---|
+| `spec_draft_created` | `SpecificationRequest` created | `specification_request_id`, `specification_version_id`, `actor_id` |
+| `spec_request_updated` | Draft fields updated | `specification_request_id`, `prior_version`, `new_version`, `content_hash`, `actor_id` |
+| `spec_generation_started` | `GenerationAttempt` moves to `running` | `specification_request_id`, `specification_version_id`, `attempt_id`, `provider_id`, `model_id` |
+| `spec_generated` | Artifacts saved, version created | `specification_request_id`, `specification_version_id`, `content_digest`, `actor_id` |
+| `spec_generation_failed` | `GenerationAttempt` failed | `specification_request_id`, `specification_version_id`, `attempt_id`, `error_code` |
+| `spec_review_started` | `ReviewAttempt` moves to `running` | `specification_request_id`, `specification_version_id`, `attempt_id`, `provider_id` |
+| `spec_review_completed` | Review findings saved | `specification_request_id`, `specification_version_id`, `attempt_id`, `finding_count_by_severity` |
+| `spec_review_failed` | `ReviewAttempt` failed | `specification_request_id`, `specification_version_id`, `attempt_id`, `error_code` |
+| `critical_finding_acknowledged` | Critical finding acknowledged | `specification_version_id`, `finding_id`, `actor_id`, `acknowledged_at` |
+| `spec_approval_requested` | `ApprovalRequest` created for spec | `specification_request_id`, `specification_version_id`, `approval_id`, `parameters_hash`, `actor_id` |
+| `spec_approved` | Spec transitions to `Approved` | `specification_request_id`, `specification_version_id`, `approval_id`, `parameters_hash`, `actor_id` |
+| `spec_approval_rejected` | Approval rejected | `specification_request_id`, `specification_version_id`, `approval_id`, `reason`, `actor_id` |
+| `spec_approval_expired` | Approval expired | `specification_request_id`, `specification_version_id`, `approval_id` |
+| `spec_revision_created` | New draft version started | `specification_request_id`, `prior_version`, `new_version`, `actor_id` |
+| `mcp_tool_invoked` | MCP tool call (with argument_hash) | `specification_request_id`, `server_name`, `tool_name`, `argument_hash`, `result_status` |
 
 ---
 
@@ -745,6 +827,7 @@ CREATE TABLE generation_attempts (
     model_id TEXT NOT NULL,
     prompt_hash TEXT NOT NULL,
     context_truncated INTEGER NOT NULL DEFAULT 0,
+    cancellation_requested INTEGER NOT NULL DEFAULT 0,  -- F6: set by DELETE /{id}/generate
     status TEXT NOT NULL DEFAULT 'pending'
         CHECK(status IN ('pending','running','succeeded','failed','cancelled')),
     started_at TEXT,
@@ -763,6 +846,7 @@ CREATE TABLE review_attempts (
     provider_id TEXT NOT NULL,
     model_id TEXT NOT NULL,
     artifact_hash TEXT NOT NULL,
+    cancellation_requested INTEGER NOT NULL DEFAULT 0,  -- F6: set by DELETE /{id}/review
     status TEXT NOT NULL DEFAULT 'pending'
         CHECK(status IN ('pending','running','succeeded','failed','cancelled')),
     started_at TEXT,
@@ -834,7 +918,8 @@ Migration 009 creates only new tables. It does NOT alter `workflow_runs`, `workf
 | MCP timeout | `MCPTimeoutError` | Same as permission denied |
 | Concurrent generation on same request | Two simultaneous `POST /generate` calls | Second call returns HTTP 409 `GENERATION_ALREADY_IN_PROGRESS` |
 | Concurrent review on same version | Two simultaneous `POST /review` calls | Second call returns HTTP 409 `REVIEW_ALREADY_IN_PROGRESS` |
-| Process restart mid-generation | `GenerationAttempt.status = "running"` on startup | Startup recovery sets `status = "failed"`, `error_code = "INTERRUPTED"` (REQ-W2.9.9) |
+| Process restart mid-generation | `GenerationAttempt.status = "running"` on startup | Startup recovery sets `status = "failed"`, `error_code = "INTERRUPTED"` **AND** transitions `SpecificationRequest.status` from `"generating"` back to `"draft"` and `SpecificationVersion.status` from `"generating"` back to `"draft"` (F10 fix; REQ-W2.9.9) |
+| Process restart mid-review | `ReviewAttempt.status = "running"` on startup | Startup recovery sets `status = "failed"`, `error_code = "INTERRUPTED"` **AND** transitions `SpecificationVersion.status` from `"under_review"` back to `"generated"` (F10 fix; REQ-W2.9.9) |
 | Digest mismatch on approval | Artifact changed after `Generated` | `SPEC_DIGEST_MISMATCH` → approval blocked |
 | Approved spec modification | Write to approved version | HTTP 409 `SPEC_APPROVED_NO_OVERWRITE` |
 
@@ -864,12 +949,43 @@ No runtime string formatting concatenates instructions with untrusted content ou
 
 ### 11.3 Output Schema Validation
 
-Generated artifacts are parsed against `SpecificationOutputSchema` (Pydantic v2) before acceptance:
-- `requirements_md: str` (non-empty, contains metadata block markers)
-- `design_md: str` (non-empty, contains architecture section marker)
-- `tasks_md: str` (non-empty, contains at least one task ID pattern)
+**F8 resolution — Explicit schema definitions:**
 
-This is structural only; semantic correctness is not guaranteed.
+Generated artifacts are validated against `SpecificationOutputSchema` (Pydantic v2) before acceptance:
+
+```python
+class SpecificationOutputSchema(BaseModel):
+    """Expected AI response envelope for specification generation."""
+    requirements_md: str = Field(min_length=50)   # non-empty markdown
+    design_md: str = Field(min_length=50)
+    tasks_md: str = Field(min_length=50)
+```
+
+Structural checks applied after Pydantic parse (deterministic, regex-based):
+- `requirements_md` MUST contain the metadata block marker `**Version:**` and at least one `### REQ-` pattern.
+- `design_md` MUST contain at least one `## ` section header and the string `Architecture`.
+- `tasks_md` MUST contain at least one task ID pattern matching `\b[A-Z0-9]+\.T\d+\b` or `\bW2\.T\d+\b`.
+
+If Pydantic parse fails (non-JSON or missing fields), the error code is `MALFORMED_OUTPUT`. If Pydantic parse succeeds but structural checks fail, the error code is also `MALFORMED_OUTPUT` with detail indicating which check failed.
+
+Review output is validated against `ReviewOutputSchema`:
+
+```python
+class ReviewFindingSchema(BaseModel):
+    severity: Literal["Critical", "High", "Medium", "Low", "Informational"]
+    dimension: str = Field(min_length=1)
+    finding_text: str = Field(min_length=1)
+    location: str = Field(min_length=1)   # e.g. "requirements.md §3.2"
+    recommendation: str = Field(min_length=1)
+
+class ReviewOutputSchema(BaseModel):
+    """Expected AI response envelope for specification review."""
+    findings: list[ReviewFindingSchema]
+```
+
+If the AI review response cannot be parsed as `ReviewOutputSchema`, a single deterministic `High` finding `AI_REVIEW_MALFORMED` is generated and review proceeds with only deterministic findings. The `source` field on AI findings is always `"ai"`.
+
+This is structural validation only; a schema-valid output may still be semantically incorrect.
 
 ### 11.4 Secret Redaction
 

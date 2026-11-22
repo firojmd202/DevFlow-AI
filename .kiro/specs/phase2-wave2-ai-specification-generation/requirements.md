@@ -1,7 +1,7 @@
 # DevFlow AI — Phase 2 Wave 2: AI Specification Generation and Review Requirements
 
-**Version:** 1.0.0
-**Status:** Draft
+**Version:** 1.1.0
+**Status:** Draft — Review findings addressed (F1–F7, F9, F10, F12, F13, F15, F17)
 **Scope:** Phase 2 Wave 2 — AI Specification Generation and Review
 **Branch:** `feature/phase2-wave2-ai-spec-generation`
 **Base commit:** `b3b37ff` (Wave 1 implementation merged, develop HEAD)
@@ -10,6 +10,7 @@
 
 **Version history:**
 - v1.0.0 — 2026-11-18 — Initial Wave 2 specification draft.
+- v1.1.0 — 2026-11-18 — Review findings addressed: F1 (OllamaProvider uses httpx directly), F2 (audit payload_json keys, no new columns), F3 (standalone approval path, two-path documentation), F4 (timeout conflict resolved), F5 (_authorized context manager requirement added to REQ-W2.3.2), F6 (cancellation routes added to REQ-W2.8.1 and REQ-W2.8.2), F7 (Under Review transition rule unified), F9 (parameters_hash canonical definition in REQ-W2.7.1), F10 (recovery status transitions, W2.9.9.4 added), F11 (char/4 heuristic + test criterion), F12 (HTTP 499 replaced with 409), F13 (SpecificationVersion creation timing), F15 (content_digest canonical separator), F17 (W2.T4 no longer depends on W2.T2).
 
 ---
 
@@ -82,12 +83,13 @@ W2.1.3.3 — No code path in `OllamaProvider` calls any OpenAI endpoint.
 
 ### REQ-W2.1.4
 WHEN a provider request is made,
-THEN the system MUST enforce a configurable request timeout (`Settings.AI_REQUEST_TIMEOUT_SECONDS`, default 120) and support cooperative cancellation. A timed-out request MUST surface as `PROVIDER_TIMEOUT`; a cancelled request as `PROVIDER_CANCELLED`.
+THEN the system MUST enforce a configurable total request timeout (`Settings.AI_REQUEST_TIMEOUT_SECONDS`, default 120) and support cooperative cancellation. **F4 resolution:** `AI_REQUEST_TIMEOUT_SECONDS` is the wall-clock budget for the entire AI generation call and governs `OllamaProvider.generate()` via `asyncio.timeout`. It is distinct from `Settings.OLLAMA_TIMEOUT_SECONDS` (default 30, existing setting), which governs connection establishment and health-check requests in `OllamaAdapter`. The two settings coexist without conflict: `OLLAMA_TIMEOUT_SECONDS` is for HTTP connection/idle timeouts; `AI_REQUEST_TIMEOUT_SECONDS` is for the total generation duration. `OllamaProvider.generate()` uses `asyncio.timeout(AI_REQUEST_TIMEOUT_SECONDS)` as the outer budget and sets the `httpx.AsyncClient` timeout for connection to `OLLAMA_TIMEOUT_SECONDS`. A timed-out request MUST surface as `PROVIDER_TIMEOUT`; a cancelled request as `PROVIDER_CANCELLED`.
 
 **Acceptance Criteria:**
-W2.1.4.1 — A mocked provider that sleeps beyond the timeout raises `PROVIDER_TIMEOUT`.
+W2.1.4.1 — A mocked provider that sleeps beyond `AI_REQUEST_TIMEOUT_SECONDS` raises `PROVIDER_TIMEOUT`.
 W2.1.4.2 — Cancellation via Python `asyncio.CancelledError` propagates correctly and surfaces as `PROVIDER_CANCELLED` at the service boundary.
-W2.1.4.3 — `Settings.AI_REQUEST_TIMEOUT_SECONDS` is a declared setting with default 120.
+W2.1.4.3 — `Settings.AI_REQUEST_TIMEOUT_SECONDS` is a declared setting with default 120. It is added to `devflow_core/config.py` by W2.T1.
+W2.1.4.4 — A test confirms that `OLLAMA_TIMEOUT_SECONDS` is NOT used as the generation timeout; a provider that connects successfully but takes 90 seconds to respond succeeds when `AI_REQUEST_TIMEOUT_SECONDS = 120`.
 
 ### REQ-W2.1.5
 WHEN a provider returns a response,
@@ -186,12 +188,13 @@ W2.3.1.3 — A disabled server (`enabled = False`) raises `MCPServerNotFoundErro
 
 ### REQ-W2.3.2
 WHEN the `MCPClientAdapter` is designed,
-THEN it MUST wrap the existing `MCPClient` from `src/devflow_api/adapters/mcp_client.py` and add a Wave 2 adapter layer that: validates tool input against a registered JSON schema before invocation; normalizes `MCPToolResult` to a `ContextChunk` schema consumed by `SpecificationGenerationService`; records every tool call in the audit log with server name, tool name, argument hash (not raw arguments), and result status.
+THEN it MUST wrap the existing `MCPClient` from `src/devflow_api/adapters/mcp_client.py` and add a Wave 2 adapter layer that: validates tool input against a registered JSON schema before invocation; normalizes `MCPToolResult` to a `ContextChunk` schema consumed by `SpecificationGenerationService`; records every tool call in the audit log with server name, tool name, argument hash (not raw arguments), and result status. **F5:** Tool invocation MUST use the `MCPClient._authorized(server_name, tool_name, arguments, on_launch)` async context manager before calling `call_tool`; calling `call_tool` without first entering this context manager raises `MCPPermissionError`.
 
 **Acceptance Criteria:**
 W2.3.2.1 — Tool invocation arguments are validated against a registered schema before the subprocess is started; a schema violation raises `MCPToolSchemaError` without starting the subprocess.
 W2.3.2.2 — Every MCP tool call writes an `mcp_tool_invoked` audit entry with `server_name`, `tool_name`, `argument_hash`, `result_status`.
 W2.3.2.3 — `MCPClientAdapter` does not expose raw `MCPServerConfig.env` contents; credential values are not logged.
+W2.3.2.4 — **F5:** Tool invocation MUST use `async with self._mcp_client._authorized(server_name, tool_name, arguments, on_launch)` before each `call_tool` invocation. A test verifies `MCPPermissionError` is raised when this context manager is not entered.
 
 ### REQ-W2.3.3
 WHEN MCP tool invocations retrieve context for specification generation,
@@ -369,8 +372,8 @@ Draft → Generated → Under Review → Revision Required
 Legal transitions:
 - `Draft → Generated`: generation succeeds and all three artifacts are validated.
 - `Generated → Under Review`: review is triggered by the user.
-- `Under Review → Revision Required`: one or more `Critical` or `High` findings exist after review completes; or the user manually requests revision.
-- `Under Review → Ready for Approval`: review completes with no `Critical` findings and no unacknowledged `High` findings.
+- `Under Review → Revision Required`: **F7 unified rule (identical to design §3.7):** any `Critical` finding forces `Revision Required` with no acknowledgment path out; OR the user manually requests revision. `High` findings do NOT force `Revision Required` automatically; they block the approval gate (REQ-W2.5.4) but do not change the lifecycle state.
+- `Under Review → Ready for Approval`: review completes with no `Critical` findings (regardless of `High` findings; `High` findings are present in the approval gate if unacknowledged).
 - `Revision Required → Draft`: the user edits and resubmits the request; version increments.
 - `Ready for Approval → Approved`: explicit human approval (REQ-W2.7).
 - `Ready for Approval → Revision Required`: the user rejects before approving.
@@ -416,16 +419,21 @@ W2.6.4.3 — Creating a new version after approval preserves the approved versio
 
 ### REQ-W2.7.1
 WHEN a specification reaches `Ready for Approval`,
-THEN the system MUST create an `ApprovalRequest` using the Wave 1 `ApprovalService.request_bound_approval` path. The approval MUST bind to: `operation = "approve_specification"`, `parameters_hash` (SHA-256 of `specification_version_id + content_digest`), `actor_id = Settings.LOCAL_OPERATOR_ID`, `workflow_step_run_id` (if the spec request is linked to a Wave 1 workflow step), `expires_at = now + Settings.APPROVAL_TTL_SECONDS`.
+THEN the system MUST create an `ApprovalRequest` using the Wave 1 `ApprovalService`. The approval MUST bind to: `operation = "approve_specification"`, `parameters_hash` (canonical SHA-256 as defined in design §3.9: `sha256(f"{version_id}:{content_digest}".encode("utf-8")).hexdigest()` — colon separator), `actor_id = Settings.LOCAL_OPERATOR_ID`, `expires_at = now + Settings.APPROVAL_TTL_SECONDS`.
+
+**F3 — Two approval paths:**
+- **Workflow-bound path** (when `SpecificationRequest.workflow_id IS NOT NULL`): call `ApprovalService.request_bound_approval(run_id=spec_request.workflow_id, step_run_id=spec_request.workflow_step_id)`.
+- **Standalone path** (when `SpecificationRequest.workflow_id IS NULL`): call `ApprovalService.request_standalone_approval(operation, parameters_hash, actor_id, expires_at)`, which creates an `ApprovalRequest` with `workflow_run_id = NULL` and `workflow_step_run_id = NULL`. `SpecificationApprovalService` MUST NOT create `ApprovalRequest` rows directly in either path.
 
 **Acceptance Criteria:**
-W2.7.1.1 — The `ApprovalRequest` row carries `operation = "approve_specification"` and a correct `parameters_hash`.
+W2.7.1.1 — The `ApprovalRequest` row carries `operation = "approve_specification"` and a `parameters_hash` matching the canonical formula `sha256(f"{version_id}:{content_digest}".encode("utf-8")).hexdigest()`.
 W2.7.1.2 — The approval expires after `APPROVAL_TTL_SECONDS` seconds; resolution after expiry returns HTTP 409 `APPROVAL_EXPIRED`.
-W2.7.1.3 — `SpecificationApprovalService` calls `ApprovalService.request_bound_approval`; it does NOT create `ApprovalRequest` rows directly.
+W2.7.1.3 — `SpecificationApprovalService` calls `ApprovalService.request_bound_approval` or `ApprovalService.request_standalone_approval`; it does NOT create `ApprovalRequest` rows directly.
+W2.7.1.4 — When `workflow_id IS NULL`, the resulting `ApprovalRequest` has `workflow_run_id = NULL` and `workflow_step_run_id = NULL`.
 
 ### REQ-W2.7.2
 WHEN a specification approval is resolved,
-THEN `SpecificationApprovalService.resolve(approval_id, decision, resolved_by)` MUST delegate to `ApprovalService.resolve` (Wave 1) for all approval validity, TTL, and status checks. Wave 2 MUST NOT duplicate or shadow the Wave 1 approval resolution logic. After a successful `approved` resolution, `SpecificationApprovalService` MUST transition the specification to `Approved` and persist `approved_at`, `approved_by`, `approval_id`.
+THEN `SpecificationApprovalService.resolve(approval_id, decision, resolved_by)` MUST delegate to `ApprovalService.resolve` (Wave 1) for all approval validity, TTL, and status checks. Wave 2 MUST NOT duplicate or shadow the Wave 1 approval resolution logic. The `resolve` path is identical for both workflow-bound and standalone approvals (the distinction is handled at creation time only). After a successful `approved` resolution, `SpecificationApprovalService` MUST transition the specification to `Approved` and persist `approved_at`, `approved_by`, `approval_id`.
 
 **Acceptance Criteria:**
 W2.7.2.1 — All `APPROVAL_EXPIRED`, `APPROVAL_ALREADY_RESOLVED` error codes originate from Wave 1 `ApprovalService`; Wave 2 does not re-implement these checks.
@@ -461,11 +469,11 @@ W2.7.5.3 — No Wave 3 executor invocation path bypasses this check.
 
 ### REQ-W2.7.6
 WHEN audit evidence is required,
-THEN every approval gate event MUST be recorded in `WorkflowAuditLog` (reusing Wave 1 audit columns) with: `event_type`, `workflow_run_id` (nullable), `workflow_step_run_id` (nullable), `actor_id`, `specification_version_id` (new FK or denormalized ID), `approval_id`, `parameters_hash`, `timestamp`. The audit log MUST be append-only; no event is ever deleted or updated.
+THEN every approval gate event MUST be recorded in `WorkflowAuditLog` (reusing Wave 1 audit columns: `id`, `workflow_run_id`, `event_type`, `actor`, `payload_json`, `created_at`). The `specification_version_id` and `approval_id` values are NOT added as dedicated columns to `workflow_audit_log` (migration 009 does not alter this table). Instead, they are stored as named keys inside `payload_json` using the canonical key names `"specification_version_id"` and `"approval_id"` respectively (see design §8.8 F2 resolution). The audit log MUST be append-only; no event is ever deleted or updated.
 
 **Acceptance Criteria:**
 W2.7.6.1 — `spec_approval_requested`, `spec_approved`, `spec_approval_rejected`, `spec_approval_expired` audit events are written for every corresponding state change.
-W2.7.6.2 — `GET /api/v1/specification-requests/{id}/audit` returns all audit events for the specification in chronological order.
+W2.7.6.2 — `GET /api/v1/specification-requests/{id}/audit` returns all audit events for the specification in chronological order; the route filters by `payload_json ->> 'specification_request_id' = {id}` using SQLite JSON functions (requires SQLite 3.38+).
 W2.7.6.3 — No DELETE or UPDATE SQL is executed on `workflow_audit_log` rows in any Wave 2 code path.
 
 ---
@@ -485,8 +493,10 @@ THEN the following FastAPI routes MUST be implemented:
 | `PATCH` | `/api/v1/specification-requests/{id}` | Update draft fields |
 | `DELETE` | `/api/v1/specification-requests/{id}` | Cancel (soft delete, status = Cancelled) |
 | `POST` | `/api/v1/specification-requests/{id}/generate` | Trigger generation |
+| `DELETE` | `/api/v1/specification-requests/{id}/generate` | Cancel in-progress generation (F6) |
 | `GET` | `/api/v1/specification-requests/{id}/status` | Poll generation/review status |
 | `POST` | `/api/v1/specification-requests/{id}/review` | Trigger AI review |
+| `DELETE` | `/api/v1/specification-requests/{id}/review` | Cancel in-progress review (F6) |
 | `GET` | `/api/v1/specification-requests/{id}/review/findings` | Get review findings |
 | `POST` | `/api/v1/specification-requests/{id}/approve` | Submit approval decision |
 | `POST` | `/api/v1/specification-requests/{id}/findings/{finding_id}/acknowledge` | Acknowledge Critical finding |
@@ -502,10 +512,14 @@ W2.8.1.3 — `mypy --strict` passes for all route handlers.
 WHEN asynchronous generation or review is in progress,
 THEN the system MUST handle provider calls that exceed HTTP request timeouts using a background-task pattern. The trigger endpoints (`/generate`, `/review`) MUST return HTTP 202 Accepted with a `task_id`; the client polls `/status` to check progress. The background task MUST update `GenerationAttempt.status` or `ReviewAttempt.status` atomically; the status endpoint returns the current status without blocking.
 
+**F6 — Cancellation routes:**
+- `DELETE /api/v1/specification-requests/{id}/generate` — cancel an in-progress or pending generation (returns HTTP 200 `{"status": "cancellation_requested"}` or HTTP 409 `TASK_NOT_CANCELLABLE`).
+- `DELETE /api/v1/specification-requests/{id}/review` — cancel an in-progress or pending review (same response contract).
+
 **Acceptance Criteria:**
 W2.8.2.1 — `POST /generate` returns HTTP 202 with `{"task_id": "...", "status": "pending"}`.
 W2.8.2.2 — `GET /status` returns `{"status": "running" | "succeeded" | "failed" | "cancelled"}` without blocking.
-W2.8.2.3 — Cancelling a pending or running task (via DELETE or a cancel endpoint) sets status to `cancelled` and does not leave orphaned background tasks.
+W2.8.2.3 — Cancelling via `DELETE /api/v1/specification-requests/{id}/generate` or `DELETE /api/v1/specification-requests/{id}/review` sets the attempt status to `cancelled` and does not leave orphaned background tasks.
 
 ### REQ-W2.8.3
 WHEN API error states are defined,
@@ -517,7 +531,7 @@ THEN the API MUST return documented error codes for all named failure states:
 | `PROVIDER_UNAVAILABLE` | 503 | AI provider not reachable |
 | `PROVIDER_TIMEOUT` | 504 | AI request timed out |
 | `PROVIDER_NOT_CONFIGURED` | 400 | OpenAI selected but not configured |
-| `PROVIDER_CANCELLED` | 499 | Request cancelled by client |
+| `PROVIDER_CANCELLED` | 409 | Request cancelled by client (409 is used when the client explicitly cancels an in-progress task; response body contains `error_code: PROVIDER_CANCELLED`) |
 | `MALFORMED_OUTPUT` | 422 | AI output failed schema validation |
 | `MCP_CONTEXT_FAILURE` | 502 | Critical MCP context retrieval failed |
 | `SPEC_APPROVED_NO_OVERWRITE` | 409 | Attempt to modify approved spec |
@@ -635,6 +649,7 @@ THEN a `GenerationAttempt` or `ReviewAttempt` left in `running` state after a pr
 W2.9.9.1 — On startup, the system scans for `GenerationAttempt` or `ReviewAttempt` rows with `status = "running"` and transitions them to `failed` with `error_code = "INTERRUPTED"`.
 W2.9.9.2 — Recovery is idempotent; running it twice produces the same result.
 W2.9.9.3 — Recovery does not auto-trigger a new generation or review; the user must explicitly do so.
+W2.9.9.4 — **F10:** Recovery of a `GenerationAttempt` to `failed` MUST also transition `SpecificationRequest.status` from `"generating"` back to `"draft"` and log a `spec_generation_failed` audit event. Recovery of a `ReviewAttempt` to `failed` MUST also transition `SpecificationVersion.status` from `"under_review"` back to `"generated"`.
 
 ---
 

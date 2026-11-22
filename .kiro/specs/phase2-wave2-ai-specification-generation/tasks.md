@@ -1,15 +1,16 @@
 # DevFlow AI — Phase 2 Wave 2: AI Specification Generation and Review Tasks
 
-**Version:** 1.0.0
-**Status:** Draft
+**Version:** 1.1.0
+**Status:** Draft — Review findings addressed (F1, F3, F4, F5, F6, F9, F15, F17)
 **Scope:** Phase 2 Wave 2 — AI Specification Generation and Review
 **Branch:** `feature/phase2-wave2-ai-spec-generation`
 **Base commit:** `b3b37ff` (Wave 1 implementation merged, develop HEAD)
 **Last Updated:** 2026-11-18
-**Companions:** `requirements.md` (v1.0.0), `design.md` (v1.0.0).
+**Companions:** `requirements.md` (v1.1.0), `design.md` (v1.1.0).
 
 **Version history:**
 - v1.0.0 — 2026-11-18 — Initial Wave 2 task breakdown.
+- v1.1.0 — 2026-11-18 — Review findings addressed: F1 (OllamaProvider uses httpx directly, not OllamaAdapter), F3 (standalone approval path in W2.T7), F4 (Settings fields list clarified in W2.T1), F5 (_authorized context manager test in W2.T3), F6 (cancellation routes in W2.T9), F9 (canonical parameters_hash definition in W2.T7), F15 (content_digest references design §3.8), F17 (W2.T4 no longer depends on W2.T2).
 
 ---
 
@@ -30,12 +31,25 @@
 **Depends on:** Wave 1 baseline (commit `b3b37ff`); nothing else.
 
 **Description:**
-Create the `AIProvider` Protocol in `src/devflow_api/providers/base.py` with methods `generate`, `check_availability`, `check_capability` and supporting Pydantic v2 schemas (`GenerationOptions`, `ProviderResponse`, `TokenUsage`, `AvailabilityResult`) in `src/devflow_api/schemas/ai_provider.py`. Create `OllamaProvider` in `src/devflow_api/providers/ollama_provider.py` wrapping the existing `OllamaAdapter`. Create `ProviderFactory` in `src/devflow_api/providers/factory.py`. Add `Settings` fields: `AI_PROVIDER` (default `"ollama"`), `OLLAMA_MODEL` (default `"llama3.2"`), `AI_REQUEST_TIMEOUT_SECONDS` (default 120), `AI_MAX_RETRIES` (default 2), `AI_RETRY_BUDGET_SECONDS` (default 30).
+Create the `AIProvider` Protocol in `src/devflow_api/providers/base.py` with methods `generate`, `check_availability`, `check_capability` and supporting Pydantic v2 schemas (`GenerationOptions`, `ProviderResponse`, `TokenUsage`, `AvailabilityResult`) in `src/devflow_api/schemas/ai_provider.py`. Create `OllamaProvider` in `src/devflow_api/providers/ollama_provider.py`; it communicates directly with the Ollama HTTP API via `httpx.AsyncClient` (identical pattern to `OpenAIProvider`) and does NOT wrap `OllamaAdapter` for generation calls (see design §3.2 F1 resolution). Create `ProviderFactory` in `src/devflow_api/providers/factory.py`.
+
+**F4 resolution — New `Settings` fields added in W2.T1** (to `src/devflow_core/config.py`):
+- `AI_PROVIDER` (default `"ollama"`)
+- `AI_REQUEST_TIMEOUT_SECONDS` (default 120)
+- `AI_MAX_RETRIES` (default 2)
+- `AI_RETRY_BUDGET_SECONDS` (default 30)
+- `AI_MAX_PROMPT_TOKENS` (default 8000)
+- `AI_MAX_OUTPUT_TOKENS` (default 4000)
+- `OPENAI_API_KEY: SecretStr | None` (default `None`)
+- `OPENAI_MODEL` (default `"gpt-4o-mini"`)
+- `OLLAMA_MODEL` (default `"llama3.2"`)
+- `OLLAMA_BASE_URL` — already exists in `Settings`; no change.
+- `OLLAMA_TIMEOUT_SECONDS` — already exists in `Settings`; no change. Used only by `OllamaAdapter` for health-check pings, NOT by `OllamaProvider.generate()`.
 
 **Acceptance Criteria:**
 W2.T1.1 — `AIProvider` Protocol is importable from `devflow_api.providers.base`; `mypy --strict` passes.
 W2.T1.2 — `ProviderFactory.create(settings)` with no `AI_PROVIDER` returns an `OllamaProvider`.
-W2.T1.3 — `OllamaProvider.generate()` with a mocked `OllamaAdapter` returning a valid response produces a `ProviderResponse` with correct fields.
+W2.T1.3 — `OllamaProvider.generate()` with a mocked `httpx.AsyncClient` returning a valid Ollama JSON response produces a `ProviderResponse` with correct `content`, `usage.prompt_tokens`, and `usage.completion_tokens` fields (mapped from `prompt_eval_count` and `eval_count` respectively).
 W2.T1.4 — `OllamaProvider` wraps `httpx.ConnectError` → `ProviderUnavailableError`; `httpx.TimeoutException` → `ProviderTimeoutError`.
 W2.T1.5 — Retry logic: a mock that fails twice then succeeds completes after two retries; a `ProviderAuthError` mock never retries.
 W2.T1.6 — A test with `AI_PROVIDER="ollama"` confirms `ProviderFactory.create()` never imports or instantiates `OpenAIProvider`.
@@ -82,6 +96,7 @@ W2.T3.5 — A call to a tool not in `allowed_tools` raises `MCPPermissionError` 
 W2.T3.6 — A non-critical MCP failure (`required=False`) returns a `ContextChunk` with `content=""` and logs a warning; no exception propagated.
 W2.T3.7 — A critical MCP failure (`required=True`) raises `MCPContextFailureError` with `code="MCP_CONTEXT_FAILURE"`.
 W2.T3.8 — Module docstring states MCP SDK version the adapter was authored against.
+W2.T3.9 — **F5:** A test verifies that calling `MCPClient.call_tool()` without first entering the `MCPClient._authorized(server_name, tool_name, arguments, on_launch)` context manager raises `MCPPermissionError`. `MCPClientAdapter.retrieve_context()` MUST always use `async with self._mcp_client._authorized(...)` before calling `call_tool`; a test confirms `MCPPermissionError` is raised when the context manager is bypassed.
 
 ---
 
@@ -138,7 +153,7 @@ W2.T5.10 — `subprocess`, `os.system`, `exec`, `eval` absent from the service m
 **Depends on:** W2.T8 (migration must exist for the tables).
 
 **Description:**
-Create `SpecificationVersionRepository` in `src/devflow_api/repositories/specification_version.py`. Implement methods: `create_request`, `get_request`, `update_request`, `create_version`, `transition_status` (CAS with `BEGIN IMMEDIATE`), `compute_and_set_digest`, `verify_digest`, `save_artifact`, `get_artifact`, `list_versions`, `list_requests`. Content digest: `sha256(requirements_text + "\n---\n" + design_text + "\n---\n" + tasks_text)` (canonical separator). `transition_status` raises `InvalidSpecTransitionError` on CAS failure.
+Create `SpecificationVersionRepository` in `src/devflow_api/repositories/specification_version.py`. Implement methods: `create_request`, `get_request`, `update_request`, `create_version`, `transition_status` (CAS with `BEGIN IMMEDIATE`), `compute_and_set_digest`, `verify_digest`, `save_artifact`, `get_artifact`, `list_versions`, `list_requests`. **F15:** Content digest computation MUST use the canonical separator defined in `design.md §3.8`: `sha256((requirements_text + "\n---\n" + design_text + "\n---\n" + tasks_text).encode("utf-8")).hexdigest()`. Do not use simple concatenation. `transition_status` raises `InvalidSpecTransitionError` on CAS failure.
 
 **Acceptance Criteria:**
 W2.T6.1 — `transition_status` with correct `from_status` succeeds; with wrong `from_status` raises `InvalidSpecTransitionError` without mutating the row.
@@ -158,10 +173,24 @@ W2.T6.7 — `mypy --strict` passes for the repository module.
 **Depends on:** W2.T6, Wave 1 `ApprovalService` (existing in `src/devflow_api/services/approval.py`).
 
 **Description:**
-Create `SpecificationApprovalService` in `src/devflow_api/services/specification_approval.py`. Implement `request_approval`, `resolve`, `is_implementation_authorized`. Delegate all approval mechanics to Wave 1 `ApprovalService`; do NOT create `ApprovalRequest` rows directly. Implement `parameters_hash = sha256(str(version_id) + content_digest)`. Write all named audit events. Implement `consume_atomic` CAS for single-use approval enforcement (reusing Wave 1 path).
+Create `SpecificationApprovalService` in `src/devflow_api/services/specification_approval.py`. Implement `request_approval`, `resolve`, `is_implementation_authorized`. Delegate all approval mechanics to Wave 1 `ApprovalService`; do NOT create `ApprovalRequest` rows directly.
+
+**F9 — Canonical `parameters_hash`:** Implement exactly as defined in `design.md §3.9`:
+```python
+parameters_hash = hashlib.sha256(
+    f"{version_id}:{content_digest}".encode("utf-8")
+).hexdigest()
+```
+(colon separator; `version_id` as decimal string; `content_digest` as 64-char hex). This definition is used in both paths below; do not use an alternative formula.
+
+**F3 — Two approval paths:**
+- **Workflow-bound path** (when `SpecificationRequest.workflow_id` is set): call `ApprovalService.request_bound_approval(run_id=spec_request.workflow_id, step_run_id=spec_request.workflow_step_id)`.
+- **Standalone path** (when `SpecificationRequest.workflow_id IS NULL`): call `ApprovalService.request_standalone_approval(operation, parameters_hash, actor_id, expires_at)` — a new minimal method on `ApprovalService` added in this task; it creates an `ApprovalRequest` with `workflow_run_id = NULL` and `workflow_step_run_id = NULL`, reusing `ApprovalRepository.create_bound` insertion logic.
+
+Write all named audit events. Implement `consume_atomic` CAS for single-use approval enforcement (reusing Wave 1 path).
 
 **Acceptance Criteria:**
-W2.T7.1 — `request_approval` creates an `ApprovalRequest` via `ApprovalService.request_bound_approval` with `operation = "approve_specification"`.
+W2.T7.1 — **Workflow-bound path:** `request_approval` creates an `ApprovalRequest` via `ApprovalService.request_bound_approval` with `operation = "approve_specification"` when `SpecificationRequest.workflow_id` is set. **Standalone path:** when `workflow_id IS NULL`, `request_approval` calls `ApprovalService.request_standalone_approval`; the resulting `ApprovalRequest` has `workflow_run_id = NULL` and `workflow_step_run_id = NULL`.
 W2.T7.2 — `resolve(approved)` delegates to `ApprovalService.resolve`; on success, transitions `SpecificationVersion.status` to `"approved"` and sets `approved_at`, `approved_by`, `approval_id`.
 W2.T7.3 — `resolve(rejected)` transitions spec to `"revision_required"` and writes `spec_approval_rejected` audit event.
 W2.T7.4 — Concurrent resolution test: two simultaneous `resolve(approved)` calls → exactly one succeeds; the other returns `APPROVAL_ALREADY_RESOLVED`.
@@ -206,11 +235,13 @@ Create `src/devflow_api/routers/specification_requests.py` with all twelve route
 W2.T9.1 — `POST /api/v1/specification-requests` with valid body returns HTTP 201 with all required response fields.
 W2.T9.2 — `POST /api/v1/specification-requests/{id}/generate` returns HTTP 202 with `task_id` and `poll_url`.
 W2.T9.3 — `GET /api/v1/specification-requests/{id}/status` returns current status without blocking.
-W2.T9.4 — All twelve routes appear in `/openapi.json`.
+W2.T9.4 — All fourteen routes appear in `/openapi.json` (twelve original + two cancellation routes).
 W2.T9.5 — All error codes from design §4.3 (REQ-W2.8.3) are exercised in route tests.
 W2.T9.6 — An unhandled exception in a handler returns HTTP 500 with `{"code":"INTERNAL_ERROR","message":"An internal error occurred."}` and no stack trace.
 W2.T9.7 — `actor_id` is NEVER read from request bodies; it always equals `Settings.LOCAL_OPERATOR_ID`.
 W2.T9.8 — `mypy --strict` passes for the router and schema modules.
+W2.T9.9 — **F6:** `DELETE /api/v1/specification-requests/{id}/generate` returns HTTP 200 `{"status": "cancellation_requested"}` when the generation attempt is in `pending` or `running` state; returns HTTP 409 `TASK_NOT_CANCELLABLE` when already terminal.
+W2.T9.10 — **F6:** `DELETE /api/v1/specification-requests/{id}/review` returns HTTP 200 `{"status": "cancellation_requested"}` when the review attempt is in `pending` or `running` state; returns HTTP 409 `TASK_NOT_CANCELLABLE` when already terminal.
 
 ---
 
@@ -287,24 +318,24 @@ Wave 1 baseline (b3b37ff)
     ├── W2.T1 (AIProvider + OllamaProvider)
     │       │
     │       └── W2.T2 (OpenAIProvider)
-    │               │
-    │               └── W2.T4 (SpecificationGenerationService) ─────────────────┐
-    │                                                                             │
-    ├── W2.T3 (MCPClientAdapter) ────────────────────────────────────────────────┤
-    │                                                                             │
-    ├── W2.T8 (Migration 009) ─── W2.T6 (VersionRepository) ────────────────────┤
-    │                                     │                                       │
-    │                                     └── W2.T7 (ApprovalService) ───────────┤
-    │                                                                             │
-    │                                     W2.T5 (ReviewService) ─────────────────┤
-    │                                                                             │
-    │                                              All ──── W2.T9 (Routers) ─────┤
-    │                                                              │               │
-    │                                                              └── W2.T10 (UI)─┤
-    │                                                                              │
-    │                                              All ──── W2.T11 (Tests) ────────┤
-    │                                                                              │
-    └────────────────────────────────────────── W2.T12 (Readiness Report) ◄───────┘
+    │
+    ├── W2.T1 ─────────────────────────────── W2.T4 (SpecificationGenerationService) ──────────────┐
+    │                                                                                                │
+    ├── W2.T3 (MCPClientAdapter) ───────────────────────────────────────────────────────────────────┤
+    │                                                                                                │
+    ├── W2.T8 (Migration 009) ─── W2.T6 (VersionRepository) ───────────────────────────────────────┤
+    │                                     │                                                          │
+    │                                     └── W2.T7 (ApprovalService) ──────────────────────────────┤
+    │                                                                                                │
+    │                                     W2.T5 (ReviewService) ────────────────────────────────────┤
+    │                                                                                                │
+    │                                              All ──── W2.T9 (Routers) ───────────────────────┤
+    │                                                              │                                 │
+    │                                                              └── W2.T10 (UI) ─────────────────┤
+    │                                                                                                │
+    │                                              All ──── W2.T11 (Tests) ─────────────────────────┤
+    │                                                                                                │
+    └────────────────────────────────────────── W2.T12 (Readiness Report) ◄──────────────────────────┘
 ```
 
 ---
