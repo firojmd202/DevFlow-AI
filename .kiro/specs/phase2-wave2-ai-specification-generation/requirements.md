@@ -1,7 +1,7 @@
 # DevFlow AI — Phase 2 Wave 2: AI Specification Generation and Review Requirements
 
-**Version:** 1.2.0
-**Status:** Draft — Review findings addressed (F1–F7, F9, F10, F12, F13, F15, F17, F-NEW-1 through F-NEW-5)
+**Version:** 1.3.0
+**Status:** Draft — Review findings addressed (F1–F7, F9, F10, F12, F13, F15, F17, F-NEW-1 through F-NEW-5, F-FIN-1 through F-FIN-8)
 **Scope:** Phase 2 Wave 2 — AI Specification Generation and Review
 **Branch:** `feature/phase2-wave2-ai-spec-generation`
 **Base commit:** `b3b37ff` (Wave 1 implementation merged, develop HEAD)
@@ -12,6 +12,7 @@
 - v1.0.0 — 2026-11-18 — Initial Wave 2 specification draft.
 - v1.1.0 — 2026-11-18 — Review findings addressed: F1 (OllamaProvider uses httpx directly), F2 (audit payload_json keys, no new columns), F3 (standalone approval path, two-path documentation), F4 (timeout conflict resolved), F5 (_authorized context manager requirement added to REQ-W2.3.2), F6 (cancellation routes added to REQ-W2.8.1 and REQ-W2.8.2), F7 (Under Review transition rule unified), F9 (parameters_hash canonical definition in REQ-W2.7.1), F10 (recovery status transitions, W2.9.9.4 added), F11 (char/4 heuristic + test criterion), F12 (HTTP 499 replaced with 409), F13 (SpecificationVersion creation timing), F15 (content_digest canonical separator), F17 (W2.T4 no longer depends on W2.T2).
 - v1.2.0 — 2026-11-18 — Review findings addressed: F-NEW-1 (REQ-W2.7.1 updated: standalone approval uses specification_approval_requests table), F-NEW-2 (workflow_step_id column noted; no change needed here — REQ-W2.7.1 already references workflow_step_id correctly), F-NEW-4 (REQ-W2.5.5 AC W2.5.5.2 updated with canonical artifact_hash formula), F-NEW-5 (REQ-W2.8.3 error table extended with 3 missing codes).
+- v1.3.0 — 2026-11-18 — Final integration corrections: F-FIN-1 (REQ-W2.7.1/7.2 standalone resolution contract made explicit and self-contained), F-FIN-2 (REQ-W2.7.2/7.3 approval FK discriminated), F-FIN-3 (workflow_id renamed to workflow_run_id throughout), F-FIN-4 (ApprovalOperation enum compatibility: protected_operation = "specification_approval"), F-FIN-5 (REQ-W2.7.3 standalone atomic consumption contract defined), F-FIN-6 (REQ-W2.9.9 SpecificationRecoveryService added), F-FIN-7 (REQ-W2.7.6 audit with workflow_run_id=NULL confirmed compatible), F-FIN-8 (REQ-W2.8.2/W2.T8 table counts corrected).
 
 ---
 
@@ -136,7 +137,7 @@ W2.1.8.3 — `Settings` declares `AI_PROVIDER` (default `"ollama"`), `OLLAMA_MOD
 
 ### REQ-W2.2.1
 WHEN a user submits a specification request,
-THEN the system MUST accept a `SpecificationRequest` containing: `title: str` (required, 1–200 chars), `description: str` (required, 1–4000 chars), `business_goal: str | None`, `functional_requirements: list[str]`, `nonfunctional_constraints: list[str]`, `acceptance_criteria: list[str]`, `repo_context: str | None` (project context summary, treated as untrusted per REQ-W2.9.1), `clarifying_questions: list[str]`, `workflow_id: int | None` (optional link to a `Workflow` for Wave 1 integration). Only `title` and `description` are required to start a draft.
+THEN the system MUST accept a `SpecificationRequest` containing: `title: str` (required, 1–200 chars), `description: str` (required, 1–4000 chars), `business_goal: str | None`, `functional_requirements: list[str]`, `nonfunctional_constraints: list[str]`, `acceptance_criteria: list[str]`, `repo_context: str | None` (project context summary, treated as untrusted per REQ-W2.9.1), `clarifying_questions: list[str]`, `workflow_run_id: int | None` (optional link to a `WorkflowRun` instance for Wave 1 integration; references `workflow_runs.id`, NOT `workflows.id`), `workflow_step_id: int | None` (optional link to the `WorkflowStepRun` belonging to `workflow_run_id`). Only `title` and `description` are required to start a draft.
 
 **Acceptance Criteria:**
 W2.2.1.1 — A request with only `title` and `description` is accepted (HTTP 201).
@@ -420,35 +421,47 @@ W2.6.4.3 — Creating a new version after approval preserves the approved versio
 
 ### REQ-W2.7.1
 WHEN a specification reaches `Ready for Approval`,
-THEN the system MUST create an approval record using the appropriate path based on whether the spec request is linked to a workflow. The approval MUST bind to: `operation = "approve_specification"`, `parameters_hash` (canonical SHA-256 as defined in design §3.9: `sha256(f"{version_id}:{content_digest}".encode("utf-8")).hexdigest()` — colon separator), `actor_id = Settings.LOCAL_OPERATOR_ID`, `expires_at = now + Settings.APPROVAL_EXPIRY_SECONDS`.
+THEN the system MUST create an approval record using the appropriate path based on whether the spec request is linked to a workflow run. The approval MUST bind to: `parameters_hash` (canonical SHA-256 as defined in design §3.9: `sha256(f"{version_id}:{content_digest}".encode("utf-8")).hexdigest()` — colon separator), `actor_id = Settings.LOCAL_OPERATOR_ID`, `expires_at = now + Settings.APPROVAL_EXPIRY_SECONDS`.
 
 **Two approval paths:**
-- **Standalone path** (when `SpecificationRequest.workflow_id IS NULL`): `SpecificationApprovalService` creates a row in the `specification_approval_requests` table (not `approval_requests`) via `SpecificationApprovalRepository.create`. This table is introduced in migration 009 and is fully independent of the Wave 1 approval chain (no `workflow_run_id` or `workflow_step_run_id`). Single-use consumption is enforced by `SpecificationApprovalRepository.consume_atomic` (CAS: `consumed_at IS NULL`). Rejection sets `rejected_at`.
-- **Workflow-bound path** (when `SpecificationRequest.workflow_id IS NOT NULL`): call `ApprovalService.request_bound_approval(run_id=spec_request.workflow_id, step_run_id=spec_request.workflow_step_id)`. `SpecificationApprovalService` MUST NOT create `ApprovalRequest` rows (in `approval_requests`) directly in either path.
+- **Standalone path** (when `SpecificationRequest.workflow_run_id IS NULL`): `SpecificationApprovalService` creates a row in the `specification_approval_requests` table (not `approval_requests`) via `SpecificationApprovalRepository.create`. Fields: `specification_version_id`, `operation = "approve_specification"` (a free TEXT value, NOT part of the Wave 1 `ApprovalOperation` enum), `parameters_hash`, `actor_id`, `expires_at`, `consumed_at = NULL`, `rejected_at = NULL`. This table is introduced in migration 009 and is fully independent of the Wave 1 approval chain.
+- **Workflow-bound path** (when `SpecificationRequest.workflow_run_id IS NOT NULL`): call `ApprovalService.request_bound_approval(run_id=spec_request.workflow_run_id, step_run_id=spec_request.workflow_step_id)`. The linked workflow step template MUST have `approvable = true` and `protected_operation = "specification_approval"` (this is the actual `ApprovalOperation` enum value; `"approve_specification"` is NOT valid). `SpecificationApprovalService` MUST NOT create `ApprovalRequest` rows in `approval_requests` directly in either path.
 
 **Acceptance Criteria:**
 W2.7.1.1 — The standalone path creates a row in `specification_approval_requests` with `operation = "approve_specification"` and `parameters_hash` matching `sha256(f"{version_id}:{content_digest}".encode("utf-8")).hexdigest()`.
 W2.7.1.2 — The approval expires after `APPROVAL_EXPIRY_SECONDS` seconds; resolution after expiry returns HTTP 409 `APPROVAL_EXPIRED`.
-W2.7.1.3 — The workflow-bound path calls `ApprovalService.request_bound_approval(run_id=spec_request.workflow_id, step_run_id=spec_request.workflow_step_id)`; it does NOT create `ApprovalRequest` rows directly.
-W2.7.1.4 — When `workflow_id IS NULL`, the resulting approval row is in `specification_approval_requests` and has no `workflow_run_id` or `workflow_step_run_id` columns.
+W2.7.1.3 — The workflow-bound path calls `ApprovalService.request_bound_approval(run_id=spec_request.workflow_run_id, step_run_id=spec_request.workflow_step_id)`; it does NOT create `ApprovalRequest` rows directly.
+W2.7.1.4 — When `workflow_run_id IS NULL`, the resulting approval row is in `specification_approval_requests` and has no `workflow_run_id` or `workflow_step_run_id` columns.
+W2.7.1.5 — The workflow-bound path fails with `OperationNotPermitted` if the step template does not have `protected_operation = "specification_approval"` (the Wave 1 enum value); the value `"approve_specification"` is NOT accepted by Wave 1 and MUST NOT be passed to it.
 
 ### REQ-W2.7.2
 WHEN a specification approval is resolved,
-THEN `SpecificationApprovalService.resolve(approval_id, decision, resolved_by)` MUST delegate to `ApprovalService.resolve` (Wave 1) for all approval validity, TTL, and status checks. Wave 2 MUST NOT duplicate or shadow the Wave 1 approval resolution logic. The `resolve` path is identical for both workflow-bound and standalone approvals (the distinction is handled at creation time only). After a successful `approved` resolution, `SpecificationApprovalService` MUST transition the specification to `Approved` and persist `approved_at`, `approved_by`, `approval_id`.
+THEN `SpecificationApprovalService` MUST dispatch to the correct resolution path based on approval type:
+
+- **Standalone path:** `SpecificationApprovalService.resolve_standalone(approval_id, decision, resolved_by)` calls `SpecificationApprovalRepository.consume_atomic` (approved) or `SpecificationApprovalRepository.reject` (rejected). These operations are self-contained and do NOT delegate to `ApprovalService`. All validity checks (expiry, binding, actor, consumed state) are enforced by `SpecificationApprovalRepository` atomically in `BEGIN IMMEDIATE` transactions (design §3.9.1).
+- **Workflow-bound path:** `SpecificationApprovalService.resolve_bound(approval_id, decision, resolved_by)` delegates to `ApprovalService.resolve` (Wave 1) for all approval validity, TTL, and status checks. Wave 2 MUST NOT duplicate or shadow Wave 1 approval resolution logic for the bound path.
+
+After a successful `approved` resolution on either path: `SpecificationApprovalService` verifies the content digest (REQ-W2.6.2), transitions the specification to `Approved`, and persists `approved_at`, `approved_by`, and the appropriate approval FK column (`spec_standalone_approval_id` or `spec_bound_approval_id` per design §8.2).
 
 **Acceptance Criteria:**
-W2.7.2.1 — All `APPROVAL_EXPIRED`, `APPROVAL_ALREADY_RESOLVED` error codes originate from Wave 1 `ApprovalService`; Wave 2 does not re-implement these checks.
-W2.7.2.2 — `SpecificationVersion.status` transitions to `Approved` only after `ApprovalService.resolve` returns a successful `approved` decision.
-W2.7.2.3 — `approved_at` is set to `datetime.now(UTC)` on the `SpecificationVersion` row; `approval_id` FK is set.
+W2.7.2.1 — For the workflow-bound path, `APPROVAL_EXPIRED` and `APPROVAL_ALREADY_RESOLVED` error codes originate from Wave 1 `ApprovalService`; Wave 2 does not re-implement these checks for bound approvals.
+W2.7.2.2 — For the standalone path, `APPROVAL_EXPIRED` and `APPROVAL_ALREADY_RESOLVED` are raised by `SpecificationApprovalRepository` based on `expires_at` and `consumed_at`/`rejected_at` checks inside `BEGIN IMMEDIATE`.
+W2.7.2.3 — `SpecificationVersion.status` transitions to `"approved"` only after the resolution path confirms success and `verify_digest` passes.
+W2.7.2.4 — `approved_at` is set to `datetime.now(UTC)`; exactly one of `spec_standalone_approval_id` or `spec_bound_approval_id` is set on the `SpecificationVersion` row.
 
 ### REQ-W2.7.3
 WHEN an approval is single-use,
-THEN each `ApprovalRequest` for a specification MUST be consumed at most once. Wave 2 inherits the Wave 1 `consumed_at` mechanism: the approval is consumed atomically (CAS `UPDATE … WHERE consumed_at IS NULL`) when the `Approved` transition is executed. A second attempt to use the same approval returns HTTP 409 `APPROVAL_ALREADY_RESOLVED`.
+THEN each approval record MUST be consumed at most once. The enforcement mechanism differs by path:
+
+- **Standalone path:** `SpecificationApprovalRepository.consume_atomic` uses `BEGIN IMMEDIATE` with a CAS `UPDATE … WHERE id = ? AND consumed_at IS NULL`; if `rowcount == 0` the concurrent caller raises `APPROVAL_ALREADY_RESOLVED`. `rejected_at IS NOT NULL` is also treated as already-resolved.
+- **Workflow-bound path:** inherits the Wave 1 `ApprovalRequest.consumed_at` CAS mechanism (`UPDATE … WHERE consumed_at IS NULL`).
+
+A second attempt to use the same approval returns HTTP 409 `APPROVAL_ALREADY_RESOLVED` on either path.
 
 **Acceptance Criteria:**
-W2.7.3.1 — Concurrent resolution of the same approval: exactly one succeeds; the other returns HTTP 409.
-W2.7.3.2 — `ApprovalRequest.consumed_at` is set atomically in the same transaction as the `Approved` status transition.
-W2.7.3.3 — No code path clears `consumed_at` after it is set.
+W2.7.3.1 — Concurrent resolution of the same standalone approval: exactly one succeeds; the other raises `APPROVAL_ALREADY_RESOLVED` (HTTP 409).
+W2.7.3.2 — `consumed_at` (standalone) or `ApprovalRequest.consumed_at` (bound) is set atomically in the same transaction as the `Approved` status transition on `specification_versions`.
+W2.7.3.3 — No code path clears `consumed_at` or `rejected_at` after they are set.
 
 ### REQ-W2.7.4
 WHEN a specification is rejected,
@@ -470,10 +483,14 @@ W2.7.5.3 — No Wave 3 executor invocation path bypasses this check.
 
 ### REQ-W2.7.6
 WHEN audit evidence is required,
-THEN every approval gate event MUST be recorded in `WorkflowAuditLog` (reusing Wave 1 audit columns: `id`, `workflow_run_id`, `event_type`, `actor`, `payload_json`, `created_at`). The `specification_version_id` and `approval_id` values are NOT added as dedicated columns to `workflow_audit_log` (migration 009 does not alter this table). Instead, they are stored as named keys inside `payload_json` using the canonical key names `"specification_version_id"` and `"approval_id"` respectively (see design §8.8 F2 resolution). The audit log MUST be append-only; no event is ever deleted or updated.
+THEN every approval gate event MUST be recorded in `WorkflowAuditLog` (reusing Wave 1 audit columns: `id`, `workflow_run_id`, `event_type`, `actor`, `payload_json`, `created_at`). The `specification_version_id` and `approval_id` values are NOT added as dedicated columns to `workflow_audit_log` (migration 009 does not alter this table). Instead, they are stored as named keys inside `payload_json` using the canonical key names `"specification_version_id"` and `"approval_id"` respectively (see design §8.9).
+
+**F-FIN-7:** `WorkflowAuditLog.workflow_run_id` is `Mapped[int | None]` (source-verified in `src/devflow_api/models/audit.py`). Standalone spec events MUST pass `workflow_run_id = None` to `AuditLogRepository.log_event`. This is compatible with the existing schema; no migration change is required.
+
+The audit log MUST be append-only; no event is ever deleted or updated.
 
 **Acceptance Criteria:**
-W2.7.6.1 — `spec_approval_requested`, `spec_approved`, `spec_approval_rejected`, `spec_approval_expired` audit events are written for every corresponding state change.
+W2.7.6.1 — `spec_approval_requested`, `spec_approved`, `spec_approval_rejected`, `spec_approval_expired` audit events are written for every corresponding state change. For standalone events, `workflow_run_id = NULL` is passed to `AuditLogRepository.log_event`.
 W2.7.6.2 — `GET /api/v1/specification-requests/{id}/audit` returns all audit events for the specification in chronological order; the route filters by `payload_json ->> 'specification_request_id' = {id}` using SQLite JSON functions (requires SQLite 3.38+).
 W2.7.6.3 — No DELETE or UPDATE SQL is executed on `workflow_audit_log` rows in any Wave 2 code path.
 
@@ -649,11 +666,15 @@ W2.9.8.3 — No `traceback.format_exc()` or raw exception string appears in an H
 WHEN deterministic recovery is required,
 THEN a `GenerationAttempt` or `ReviewAttempt` left in `running` state after a process restart MUST be recovered to `failed` with `error_code = "INTERRUPTED"` on next startup. Recovery MUST be idempotent and MUST NOT auto-retry; the user MUST explicitly re-trigger generation or review after a recovery event.
 
+**F-FIN-6:** The existing Wave 1 `RecoveryService` only handles `WorkflowStepRun` rows. Wave 2 MUST implement `SpecificationRecoveryService` (see design §7) that runs at startup alongside `RecoveryService`. It is NOT a subclass of `RecoveryService`; it is a separate component in `src/devflow_api/services/specification_recovery.py`.
+
 **Acceptance Criteria:**
-W2.9.9.1 — On startup, the system scans for `GenerationAttempt` or `ReviewAttempt` rows with `status = "running"` and transitions them to `failed` with `error_code = "INTERRUPTED"`.
+W2.9.9.1 — On startup, `SpecificationRecoveryService.recover()` scans for `GenerationAttempt` rows with `status = "running"` and transitions them to `"failed"` with `error_code = "INTERRUPTED"`.
 W2.9.9.2 — Recovery is idempotent; running it twice produces the same result.
 W2.9.9.3 — Recovery does not auto-trigger a new generation or review; the user must explicitly do so.
-W2.9.9.4 — **F10:** Recovery of a `GenerationAttempt` to `failed` MUST also transition `SpecificationRequest.status` from `"generating"` back to `"draft"` and log a `spec_generation_failed` audit event. Recovery of a `ReviewAttempt` to `failed` MUST also transition `SpecificationVersion.status` from `"under_review"` back to `"generated"`.
+W2.9.9.4 — Recovery of a `GenerationAttempt` to `"failed"` MUST also transition `SpecificationRequest.status` from `"generating"` back to `"draft"` and log a `spec_generation_failed` audit event with `workflow_run_id = NULL`. Recovery of a `ReviewAttempt` to `"failed"` MUST also transition `SpecificationVersion.status` from `"under_review"` back to `"generated"` and log `spec_review_failed` with `workflow_run_id = NULL`.
+W2.9.9.5 — `SpecificationRecoveryService.recover()` is called from the FastAPI lifespan startup handler, after Wave 1 `RecoveryService.recover()` completes.
+W2.9.9.6 — `SpecificationRecoveryService` also scans `specification_approval_requests` for rows where `consumed_at IS NULL AND rejected_at IS NULL AND expires_at <= now()` and writes `spec_approval_expired` audit events (with `workflow_run_id = NULL`) for each.
 
 ---
 
