@@ -1,18 +1,19 @@
 # DevFlow AI — Phase 2 Wave 2: AI Specification Generation and Review Tasks
 
-**Version:** 1.3.0
-**Status:** Draft — Review findings addressed (F1, F3, F4, F5, F6, F9, F15, F17, F-NEW-1 through F-NEW-5, F-FIN-1 through F-FIN-8)
+**Version:** 1.4.0
+**Status:** Draft — Implementation-contract aligned (corrections C1–C6)
 **Scope:** Phase 2 Wave 2 — AI Specification Generation and Review
 **Branch:** `feature/phase2-wave2-ai-spec-generation`
 **Base commit:** `b3b37ff` (Wave 1 implementation merged, develop HEAD)
 **Last Updated:** 2026-11-18
-**Companions:** `requirements.md` (v1.3.0), `design.md` (v1.3.0).
+**Companions:** `requirements.md` (v1.4.0), `design.md` (v1.4.0).
 
 **Version history:**
 - v1.0.0 — 2026-11-18 — Initial Wave 2 task breakdown.
-- v1.1.0 — 2026-11-18 — Review findings addressed: F1 (OllamaProvider uses httpx directly, not OllamaAdapter), F3 (standalone approval path in W2.T7), F4 (Settings fields list clarified in W2.T1), F5 (_authorized context manager test in W2.T3), F6 (cancellation routes in W2.T9), F9 (canonical parameters_hash definition in W2.T7), F15 (content_digest references design §3.8), F17 (W2.T4 no longer depends on W2.T2).
-- v1.2.0 — 2026-11-18 — Review findings addressed: F-NEW-1 (W2.T7 updated: standalone path uses SpecificationApprovalRepository + specification_approval_requests table; W2.T8 updated to include 7th table), F-NEW-4 (W2.T5.5 artifact_hash formula updated to use \\n---\\n separator), F-NEW-5 (W2.T11.9 error code count updated from 12 to 15).
-- v1.3.0 — 2026-11-18 — Final integration corrections: W2.T7 (standalone resolution contract, bound resolution via ApprovalService.resolve, ApprovalOperation enum value corrected to "specification_approval", path-discriminated FK columns), W2.T8 (workflow_run_id column rename, approval column changes, DDL table count 7/15), W2.T9 (workflow_run_id in schemas), new W2.T13 (SpecificationRecoveryService), W2.T11 updated (W2.T13 dependency, additional targeted test criteria).
+- v1.1.0 — 2026-11-18 — Review findings addressed: F1, F3, F4, F5, F6, F9, F15, F17.
+- v1.2.0 — 2026-11-18 — Review findings addressed: F-NEW-1 through F-NEW-5.
+- v1.3.0 — 2026-11-18 — Integration corrections: F-FIN-1 through F-FIN-8.
+- v1.4.0 — 2026-11-18 — Implementation-contract alignment: C1 (W2.T7: standalone atomicity explicit in AC W2.T7.2 and W2.T7.14), C2 (W2.T7: resolve_bound two-phase model; W2.T7.3 and W2.T7.15 added), C3 (W2.T1: `APPROVAL_EXPIRY_SECONDS` replaced with `APPROVAL_TTL_SECONDS`), C5 (stale `workflow_id` prose reference removed).
 
 ---
 
@@ -47,7 +48,7 @@ Create the `AIProvider` Protocol in `src/devflow_api/providers/base.py` with met
 - `OLLAMA_MODEL` (default `"llama3.2"`)
 - `OLLAMA_BASE_URL` — already exists in `Settings`; no change.
 - `OLLAMA_TIMEOUT_SECONDS` — already exists in `Settings`; no change. Used only by `OllamaAdapter` for health-check pings, NOT by `OllamaProvider.generate()`.
-- `APPROVAL_EXPIRY_SECONDS` (default 3600) — new Wave 2 setting for standalone approval TTL. Note: `APPROVAL_TTL_SECONDS` (default 3600) already exists in `Settings` and governs Wave 1 bound approvals. Wave 2 adds `APPROVAL_EXPIRY_SECONDS` as a parallel setting for the standalone path; implementers may choose to alias it to `APPROVAL_TTL_SECONDS` if the same TTL is desired for both paths.
+- `APPROVAL_TTL_SECONDS` — already exists in `Settings` (default 3600). Wave 2 uses this existing field for the standalone approval `expires_at` computation (`expires_at = now + APPROVAL_TTL_SECONDS`). No new `APPROVAL_EXPIRY_SECONDS` field is added; the existing field is reused.
 
 **Acceptance Criteria:**
 W2.T1.1 — `AIProvider` Protocol is importable from `devflow_api.providers.base`; `mypy --strict` passes.
@@ -196,7 +197,7 @@ Implement `SpecificationApprovalRepository` with:
 **F-FIN-3 — Workflow-bound path (when `SpecificationRequest.workflow_run_id IS NOT NULL`):**
 Call `ApprovalService.request_bound_approval(run_id=spec_request.workflow_run_id, step_run_id=spec_request.workflow_step_id)`.
 
-**F-FIN-4 — `ApprovalOperation` enum:** The workflow-bound step template MUST have `protected_operation = "specification_approval"` (this is the actual enum value in `src/devflow_api/schemas/workflow_template.py`). The value `"approve_specification"` is NOT in the enum and MUST NOT be passed to Wave 1. The standalone `specification_approval_requests.operation` field uses `"approve_specification"` as a free TEXT value only.
+**F-FIN-4 — `ApprovalOperation` enum:** The workflow-bound step template MUST have `protected_operation = "specification_approval"` (the actual enum value in `src/devflow_api/schemas/workflow_template.py`). The value `"approve_specification"` is NOT in the enum and MUST NOT be passed to Wave 1. The standalone `specification_approval_requests.operation` field uses `"approve_specification"` as a free TEXT value only.
 
 **F-FIN-2 — Path-discriminated approval columns:** On `Approved` transition, set `spec_standalone_approval_id` (standalone path) or `spec_bound_approval_id` (bound path) on the `SpecificationVersion` row. The old single `approval_id` column is replaced by these two columns.
 
@@ -204,8 +205,8 @@ Write all named audit events. All standalone audit calls pass `workflow_run_id =
 
 **Acceptance Criteria:**
 W2.T7.1 — **Standalone path:** `request_approval` calls `SpecificationApprovalRepository.create`; a row is inserted into `specification_approval_requests` with `consumed_at = NULL` and `rejected_at = NULL`. No row is written to `approval_requests`. **Workflow-bound path:** `request_approval` calls `ApprovalService.request_bound_approval(run_id=spec_request.workflow_run_id, step_run_id=spec_request.workflow_step_id)`.
-W2.T7.2 — `resolve_standalone(approved)` calls `SpecificationApprovalRepository.consume_atomic`; on success, transitions `SpecificationVersion.status` to `"approved"` and sets `spec_standalone_approval_id`.
-W2.T7.3 — `resolve_bound(approved)` delegates to `ApprovalService.resolve`; on success, transitions `SpecificationVersion.status` to `"approved"` and sets `spec_bound_approval_id`.
+W2.T7.2 — `resolve_standalone(approved)` calls `SpecificationApprovalRepository.consume_atomic`; on success, transitions `SpecificationVersion.status` to `"approved"` and sets `spec_standalone_approval_id`. All four operations (consume, verify_digest, transition_status, log_event) run inside a single `BEGIN IMMEDIATE` transaction; a simulated digest-mismatch mid-transaction rolls back the consume.
+W2.T7.3 — `resolve_bound(approved)` calls `ApprovalService.resolve` (Phase 1); on `"approved"` return, verifies digest and transitions `SpecificationVersion.status` to `"approved"` and sets `spec_bound_approval_id`. `resolve_bound` MUST NOT call `ApprovalRepository.consume_atomic` or `dispatch_protected_txn`; test verifies via mock that neither is called.
 W2.T7.4 — Rejection transitions spec to `"revision_required"` and writes `spec_approval_rejected` audit event.
 W2.T7.5 — Concurrent resolution test: two simultaneous `resolve_standalone` calls → exactly one succeeds; the other raises `APPROVAL_ALREADY_RESOLVED`.
 W2.T7.6 — `is_implementation_authorized` returns `False` when no approved version exists.
@@ -216,6 +217,8 @@ W2.T7.10 — Approving an already-approved version returns HTTP 409 `SPEC_APPROV
 W2.T7.11 — All audit events pass `workflow_run_id = None` for the standalone path; none attempt to write a non-null FK into `workflow_audit_log.workflow_run_id` for standalone events.
 W2.T7.12 — Six approval audit events are written (`spec_approval_requested`, `spec_approved`, `spec_approval_rejected`, `spec_approval_expired`, `spec_draft_created`, `critical_finding_acknowledged`); tests verify each.
 W2.T7.13 — `consume_atomic` validates `expected_version_id`, `expected_parameters_hash`, and `expected_actor_id` before consuming; mismatched binding raises `ApprovalBindingMismatch` (not `ApprovalAlreadyResolvedError`).
+W2.T7.14 — **C1 atomicity test:** A test injects a failure after `consume_atomic` succeeds but before `transition_status` is called (simulating a crash mid-transaction); the test verifies the transaction rolls back and `consumed_at` is NOT set on the `specification_approval_requests` row.
+W2.T7.15 — **C2 non-consumption test:** For the workflow-bound path, a test mocks `ApprovalService.resolve` to return `("approved", run_mock)` and verifies that `ApprovalRepository.consume_atomic` is never called by `resolve_bound`. Consumption is Wave 1's responsibility at dispatch time.
 
 ---
 

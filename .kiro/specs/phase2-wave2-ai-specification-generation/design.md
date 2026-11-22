@@ -1,18 +1,19 @@
 # DevFlow AI — Phase 2 Wave 2: AI Specification Generation and Review Design
 
-**Version:** 1.3.0
-**Status:** Draft — Review findings addressed (F1–F17, F-NEW-1 through F-NEW-5, F-FIN-1 through F-FIN-8)
+**Version:** 1.4.0
+**Status:** Draft — Implementation-contract aligned (corrections C1–C6)
 **Scope:** Phase 2 Wave 2 — AI Specification Generation and Review
 **Branch:** `feature/phase2-wave2-ai-spec-generation`
 **Base commit:** `b3b37ff` (Wave 1 implementation merged, develop HEAD)
 **Last Updated:** 2026-11-18
-**Companion:** `requirements.md` (v1.3.0), `tasks.md` (v1.3.0).
+**Companion:** `requirements.md` (v1.4.0), `tasks.md` (v1.4.0).
 
 **Version history:**
 - v1.0.0 — 2026-11-18 — Initial Wave 2 design draft.
-- v1.1.0 — 2026-11-18 — Review findings addressed: F1 (OllamaProvider uses httpx directly, not OllamaAdapter), F2 (audit payload_json keys, no new columns on workflow_audit_log), F3 (standalone approval path), F4 (timeout conflict resolved), F5 (_authorized context manager pattern), F6 (cancellation routes added), F7 (Under Review transition rule unified), F8 (output schemas defined), F9 (parameters_hash canonical definition), F10 (recovery status transitions), F12 (HTTP 499 replaced with 409), F13 (SpecificationVersion creation timing), F14 (MCP schema registration), F15 (content_digest canonical separator), F17 (W2.T4 no longer depends on W2.T2).
-- v1.2.0 — 2026-11-18 — Review findings addressed: F-NEW-1 (standalone approval uses new specification_approval_requests table, not approval_requests), F-NEW-2 (workflow_step_id column added to specification_requests), F-NEW-3 (request_bound_approval call signature corrected), F-NEW-4 (artifact_hash formula uses \\n---\\n separator), F-NEW-5 (3 missing error codes added to §10 failure modes table).
-- v1.3.0 — 2026-11-18 — Final integration corrections: F-FIN-1 (standalone approval resolution contract made explicit and self-contained), F-FIN-2 (SpecificationVersion.approval_id made path-discriminated; spec_standalone_approval_id column added), F-FIN-3 (workflow_id renamed to workflow_run_id throughout; references workflows(id) corrected to workflow_runs(id)), F-FIN-4 (ApprovalOperation enum compatibility: workflow-bound path uses "specification_approval" per existing enum; spec operation field is separate), F-FIN-5 (SpecificationApprovalRepository atomic transaction contract defined), F-FIN-6 (Wave 2 startup recovery defined as SpecificationRecoveryService, independent of RecoveryService), F-FIN-7 (audit compatibility confirmed: workflow_run_id IS nullable; standalone events pass NULL), F-FIN-8 (§9.3 table count corrected to seven).
+- v1.1.0 — 2026-11-18 — Review findings addressed: F1–F17.
+- v1.2.0 — 2026-11-18 — Review findings addressed: F-NEW-1 through F-NEW-5.
+- v1.3.0 — 2026-11-18 — Integration corrections: F-FIN-1 through F-FIN-8.
+- v1.4.0 — 2026-11-18 — Implementation-contract alignment: C1 (standalone approval consumption and spec-status transition made atomic in one `BEGIN IMMEDIATE`; transaction ownership explicit in §3.9.1), C2 (workflow-bound approval: human-decision resolution and authorization dispatch separated; `resolve_bound` transitions spec state at `ApprovalService.resolve()` return; `consumed_at` CAS happens later at `dispatch_protected_txn`, not here), C3 (`APPROVAL_EXPIRY_SECONDS` replaced with `APPROVAL_TTL_SECONDS` throughout), C4 (readiness report reconciled to 7 tables / 15 indexes / 13 tasks), C5 (stale `workflow_id` prose reference removed from §3.9), C6 (MCP SDK 2.x prerequisite retained unchanged).
 
 ---
 
@@ -332,7 +333,7 @@ Manages the `specification_versions` and `specification_artifacts` tables.
 
 Handles both approval paths. The workflow-bound path delegates to Wave 1 `ApprovalService`. The standalone path manages `specification_approval_requests` directly via `SpecificationApprovalRepository`.
 
-**F-FIN-3:** `SpecificationRequest.workflow_run_id` (not `workflow_id`) is the FK linking to a `WorkflowRun` instance. See §8.1 for the corrected column name.
+**F-FIN-3:** `SpecificationRequest.workflow_run_id` (not the old `workflow_id`) is the FK linking to a `WorkflowRun` instance. See §8.1 for the corrected column name.
 
 **F-FIN-4:** The `ApprovalOperation` Literal in `src/devflow_api/schemas/workflow_template.py` is the closed enum `{"specification_approval", "implementation_authorization", "pr_creation_approval", "merge_approval"}`. The value `"approve_specification"` does **not** exist and would fail Pydantic validation if passed to any Wave 1 path. The workflow-bound approval gate requires the step template to have `protected_operation = "specification_approval"`. The standalone `specification_approval_requests.operation` column is a free `TEXT NOT NULL DEFAULT 'approve_specification'` — it does NOT use the `ApprovalOperation` enum, is not validated by Wave 1, and is specific to Wave 2.
 
@@ -354,7 +355,7 @@ Loads the current `SpecificationVersion` for `request_id`; computes `parameters_
 
 - **Standalone path** (when `SpecificationRequest.workflow_run_id IS NULL`):
   Calls `SpecificationApprovalRepository.create(version_id, parameters_hash, actor_id, expires_at)`.
-  `expires_at = datetime.now(UTC) + timedelta(seconds=Settings.APPROVAL_EXPIRY_SECONDS)`.
+  `expires_at = datetime.now(UTC) + timedelta(seconds=Settings.APPROVAL_TTL_SECONDS)`.
   Inserted fields: `specification_version_id`, `operation = "approve_specification"`, `parameters_hash`, `actor_id`, `expires_at`, `consumed_at = NULL`, `rejected_at = NULL`.
   Single-use: consumption is enforced by `SpecificationApprovalRepository.consume_atomic` (§3.9.1 below).
 
@@ -366,14 +367,68 @@ Loads the current `SpecificationVersion` for `request_id`; computes `parameters_
 Transitions `SpecificationVersion.status` to `"ready_for_approval"` (CAS from `"under_review"`).
 
 `resolve_standalone(approval_id, decision, resolved_by) → None`:
-- Dispatches to `SpecificationApprovalRepository.consume_atomic` (approved) or `SpecificationApprovalRepository.reject` (rejected). See §3.9.1 for the full transaction contract.
-- On `approved`: verifies digest via `SpecificationVersionRepository.verify_digest(version_id)` (REQ-W2.6.2); on mismatch raises `SPEC_DIGEST_MISMATCH`. Transitions spec to `"approved"` (CAS from `"ready_for_approval"`), sets `approved_at`, `approved_by`, `spec_standalone_approval_id`.
-- On `rejected`: sets `rejected_at` on the `specification_approval_requests` row; transitions spec to `"revision_required"` (CAS); writes `spec_approval_rejected` audit.
+
+**C1 — Atomic transaction contract.** The entire resolution — consume/reject, digest check, spec-status CAS, and audit write — executes inside a **single `BEGIN IMMEDIATE` transaction owned by `SpecificationApprovalService`**. `SpecificationApprovalRepository.consume_atomic` and `SpecificationVersionRepository.transition_status` are called with `commit=False` inside this outer transaction; only the service commits.
+
+Pseudocode:
+```
+BEGIN IMMEDIATE  (SpecificationApprovalService owns this transaction)
+  if decision == "approved":
+    SpecificationApprovalRepository.consume_atomic(
+        approval_id, expected_version_id, expected_parameters_hash,
+        expected_actor_id, commit=False)
+    -- raises ApprovalExpiredError, ApprovalAlreadyResolvedError,
+    --        ApprovalBindingMismatch, ApprovalActorMismatch on failure
+    ok = SpecificationVersionRepository.verify_digest(version_id, commit=False)
+    if not ok: raise SPEC_DIGEST_MISMATCH  -- rolls back consume
+    SpecificationVersionRepository.transition_status(
+        version_id, from_status="ready_for_approval",
+        to_status="approved", commit=False)
+    -- set approved_at, approved_by, spec_standalone_approval_id
+    AuditLogRepository.log_event("spec_approved", ..., commit=False)
+  else:  -- rejected
+    SpecificationApprovalRepository.reject(approval_id, commit=False)
+    SpecificationVersionRepository.transition_status(
+        version_id, from_status="ready_for_approval",
+        to_status="revision_required", commit=False)
+    AuditLogRepository.log_event("spec_approval_rejected", ..., commit=False)
+COMMIT
+```
 
 `resolve_bound(approval_id, decision, resolved_by) → None`:
-- Delegates to `ApprovalService.resolve(approval_id, decision, resolved_by)`.
-- On `approved`: verifies digest; transitions spec to `"approved"`; sets `approved_at`, `approved_by`, `spec_bound_approval_id`.
-- On `rejected`: transitions spec to `"revision_required"`; writes `spec_approval_rejected` audit.
+
+**C2 — Separation of concerns.** For the workflow-bound path, Wave 1 uses a two-phase model: (1) **human decision** (`ApprovalService.resolve`) records `status = "approved"` and sets `authorization_expires_at`; (2) **executor dispatch** (`WorkflowStepRunRepository.dispatch_protected_txn`) consumes the approval atomically when the protected step is about to run. These are distinct operations at different times.
+
+`resolve_bound` handles phase (1) only. It MUST NOT attempt to consume the approval or call `dispatch_protected_txn`. Wave 1 `ApprovalRepository.consume_atomic` is not called here.
+
+Pseudocode:
+```
+-- Phase 1: record the human decision (delegated entirely to Wave 1)
+approval, run = await ApprovalService.resolve(approval_id, decision, resolved_by)
+-- ApprovalService.resolve transitions approval.status and sets authorization_expires_at.
+-- It does NOT set consumed_at. consumed_at is set by dispatch_protected_txn at executor time.
+
+if decision == "approved":
+  -- Verify spec digest before transitioning spec state
+  ok = SpecificationVersionRepository.verify_digest(version_id)
+  if not ok: raise SPEC_DIGEST_MISMATCH
+  BEGIN IMMEDIATE
+    SpecificationVersionRepository.transition_status(
+        version_id, from_status="ready_for_approval",
+        to_status="approved", commit=False)
+    -- set approved_at, approved_by, spec_bound_approval_id
+    AuditLogRepository.log_event("spec_approved", ..., workflow_run_id=run.id, commit=False)
+  COMMIT
+else:  -- rejected
+  BEGIN IMMEDIATE
+    SpecificationVersionRepository.transition_status(
+        version_id, from_status="ready_for_approval",
+        to_status="revision_required", commit=False)
+    AuditLogRepository.log_event("spec_approval_rejected", ..., workflow_run_id=run.id, commit=False)
+  COMMIT
+```
+
+**Wave 1 consumption note:** When a `SpecApproverExecutor` subsequently dispatches the protected workflow step, `WorkflowStepRunRepository.dispatch_protected_txn` calls `ApprovalRepository.consume_atomic` with `operation="specification_approval"`. This is the Wave 1 approval authorization check at execution time. Wave 2 does not call or replicate this; it is entirely owned by Wave 1 infrastructure. The spec transition to `"approved"` is Wave 2's concern; the step dispatch authorization is Wave 1's concern.
 
 `is_implementation_authorized(request_id) → bool`:
 - Loads the approved `SpecificationVersion` for `request_id`.
@@ -595,6 +650,9 @@ Two new executors are registered in `ExecutorRegistry`:
 **`SpecReviewerExecutor`** (executor_id: `"spec_reviewer"`):
 - `execute(context) → StepExecutionResult`: calls `SpecificationReviewService.review(context.inputs["spec_version_id"])`.
 - Returns `output_json["finding_count_by_severity"]`.
+
+**`SpecApproverExecutor`** (executor_id: `"spec_approver"`):
+- **C2 note:** This executor handles the protected-dispatch phase of the workflow-bound approval path. When a workflow step with `approvable = True` and `protected_operation = "specification_approval"` is dispatched, Wave 1 calls `WorkflowStepRunRepository.dispatch_protected_txn`, which consumes the `ApprovalRequest.consumed_at` atomically at execution time. This executor exists in the Wave 1 registry; Wave 2 does not need to implement it. It is documented here to clarify the two-phase model: `resolve_bound` handles the human-decision phase; `dispatch_protected_txn` handles the authorization-consumption phase.
 
 Both executors:
 - Do NOT import repositories, services, or models directly (consistent with Wave 1 §1 principle 3).
