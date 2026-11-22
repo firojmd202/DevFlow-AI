@@ -1,16 +1,16 @@
 # DevFlow AI — Phase 2 Wave 2: AI Specification Generation and Review Tasks
 
-**Version:** 1.5.0
-**Status:** Draft — Approval integration clarified (corrections A1–A6)
+**Version:** 1.6.0
+**Status:** Final — Approval-contract aligned, PR-ready
 **Scope:** Phase 2 Wave 2 — AI Specification Generation and Review
 **Branch:** `feature/phase2-wave2-ai-spec-generation`
 **Base commit:** `b3b37ff` (Wave 1 implementation merged, develop HEAD)
 **Last Updated:** 2026-11-18
-**Companions:** `requirements.md` (v1.5.0), `design.md` (v1.5.0).
+**Companions:** `requirements.md` (v1.6.0), `design.md` (v1.6.0).
 
 **Version history:**
-- v1.0.0–v1.4.0 — See prior version history.
-- v1.5.0 — 2026-11-18 — Approval integration clarification: A1/A2 (W2.T6/W2.T7 SpecApproverExecutor claim removed; new W2.T14 task for ExecutorRegistry extension), A3 (W2.T7: is_implementation_authorized ACs aligned), A4 (W2.T7: workflow-bound parameters_hash is step.input_digest owned by Wave 1), A6 (W2.T7/W2.T11: targeted tests for approval lifecycle and downstream authorization added).
+- v1.0.0–v1.5.0 — See prior version history.
+- v1.6.0 — 2026-11-18 — Final approval-contract alignment: W2.T7.20 added (digest-mismatch in workflow-bound path), W2.T11.15 added (stale/mismatched/expired/replayed approval tests).
 
 ---
 
@@ -212,6 +212,7 @@ W2.T7.16 — **A3/A6 — Standalone path approved-not-consumed:** `is_implementa
 W2.T7.17 — **A6 — Standalone path successfully consumed:** `is_implementation_authorized` returns `True` when `SpecificationVersion.status = "approved"`, `verify_digest` passes, and `consumed_at IS NOT NULL`.
 W2.T7.18 — **A6 — Workflow-bound path approved:** `is_implementation_authorized` returns `True` when `SpecificationVersion.status = "approved"` and `verify_digest` passes; it does NOT require checking `authorization_expires_at` or `consumed_at` on `approval_requests` (those are Wave 1's gate at dispatch time).
 W2.T7.19 — **A6 — No implementation authorization before approval gate:** A test verifies that `is_implementation_authorized` returns `False` for a spec that is in `"ready_for_approval"` state (approval requested but not yet resolved). No downstream Wave 3 invocation can proceed.
+W2.T7.20 — **C — Digest-mismatch in workflow-bound path:** A test mocks `ApprovalService.resolve` to return `("approved", run_mock)` and then returns `False` from `verify_digest`. Verifies: (a) `SPEC_DIGEST_MISMATCH` is raised; (b) `SpecificationVersion.status` remains `"ready_for_approval"`; (c) `spec_approval_digest_mismatch` audit event is written; (d) Wave 2 does NOT call `ApprovalRepository.resolve` again or any cancellation method on the already-resolved `ApprovalRequest`.
 W2.T7.8 — `APPROVAL_EXPIRED` and `APPROVAL_ALREADY_RESOLVED` for bound approvals originate from Wave 1 `ApprovalService`; test verifies via mock.
 W2.T7.9 — `APPROVAL_EXPIRED` and `APPROVAL_ALREADY_RESOLVED` for standalone approvals are raised by `SpecificationApprovalRepository`; test verifies both expiry (past `expires_at`) and double-consume scenarios.
 W2.T7.10 — Approving an already-approved version returns HTTP 409 `SPEC_APPROVED_NO_OVERWRITE`.
@@ -320,6 +321,11 @@ W2.T11.14 — **A6 — Approval lifecycle targeted tests:**
   (d) **Failed or cancelled protected dispatch:** A test verifies that after `dispatch_protected_txn` raises `ApprovalNotConsumableError`, the orchestrator calls `request_bound_approval` again (re-gates); `is_implementation_authorized` still returns `False` because spec status is not `"approved"`.
   (e) **Replay / duplicate dispatch:** A test verifies the orchestrator's `_advance` idempotency: if an `ApprovalRequest` with `status = "approved"` and `consumed_at IS NULL` already exists for the step, `_advance` returns the same `DispatchPlan.approval_id` without creating a duplicate.
   (f) **No downstream authorization before gate:** A test verifies `is_implementation_authorized` returns `False` when spec is in `"ready_for_approval"` state.
+W2.T11.15 — **C — Stale, mismatched, expired, and replayed approval tests (workflow-bound):**
+  (a) **Stale digest at resolve time:** A test sets `spec_version.content_digest` to a different value after artifacts are saved, then calls `resolve_bound`; verifies `SPEC_DIGEST_MISMATCH`, spec stays at `"ready_for_approval"`, `spec_approval_digest_mismatch` audit event written, `ApprovalRequest.status` still `"approved"`.
+  (b) **No silent approval of modified content:** A test verifies that `is_implementation_authorized` returns `False` after a digest-mismatch event (spec is at `"ready_for_approval"`, not `"approved"`).
+  (c) **Fresh approval required:** A test verifies that after a digest-mismatch, calling `request_approval` again creates a new `ApprovalRequest` (or new `specification_approval_requests` row); the stale approval does not block the new request.
+  (d) **Expired Wave 1 authorization:** A test mocks `ApprovalRequest.authorization_expires_at` to be in the past; verifies the orchestrator's `_advance` skips dispatch and re-gates via `request_bound_approval`.
 
 ---
 

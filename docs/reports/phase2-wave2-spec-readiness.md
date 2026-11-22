@@ -1,7 +1,7 @@
 # DevFlow AI — Phase 2 Wave 2: Specification Readiness Report
 
-**Version:** 1.5.0
-**Status:** Approval integration clarified — Ready for Implementation Authorization
+**Version:** 1.6.0
+**Status:** Final — PR-ready
 **Branch:** `feature/phase2-wave2-ai-spec-generation`
 **Base commit:** `b3b37ff` (Wave 1 implementation merged, develop HEAD)
 **Last Updated:** 2026-11-18
@@ -12,9 +12,9 @@
 
 | File | Version | Status |
 |---|---|---|
-| `.kiro/specs/phase2-wave2-ai-specification-generation/requirements.md` | 1.5.0 | Approval integration clarified |
-| `.kiro/specs/phase2-wave2-ai-specification-generation/design.md` | 1.5.0 | Approval integration clarified |
-| `.kiro/specs/phase2-wave2-ai-specification-generation/tasks.md` | 1.5.0 | Approval integration clarified |
+| `.kiro/specs/phase2-wave2-ai-specification-generation/requirements.md` | 1.6.0 | Final — PR-ready |
+| `.kiro/specs/phase2-wave2-ai-specification-generation/design.md` | 1.6.0 | Final — PR-ready |
+| `.kiro/specs/phase2-wave2-ai-specification-generation/tasks.md` | 1.6.0 | Final — PR-ready |
 | `docs/reports/phase2-wave2-mcp-compatibility-assessment.md` | 1.0.0 | Draft |
 | `docs/planning/phase2-roadmap.md` | 2.2.0 | Updated (Wave 2 decisions recorded) |
 
@@ -24,9 +24,9 @@
 
 | File | Lines |
 |---|---|
-| `.kiro/specs/phase2-wave2-ai-specification-generation/requirements.md` | 722 |
-| `.kiro/specs/phase2-wave2-ai-specification-generation/design.md` | 1312 |
-| `.kiro/specs/phase2-wave2-ai-specification-generation/tasks.md` | 451 |
+| `.kiro/specs/phase2-wave2-ai-specification-generation/requirements.md` | 723 |
+| `.kiro/specs/phase2-wave2-ai-specification-generation/design.md` | 1340 |
+| `.kiro/specs/phase2-wave2-ai-specification-generation/tasks.md` | 457 |
 | `docs/reports/phase2-wave2-spec-readiness.md` | (this file) |
 | `docs/reports/phase2-wave2-mcp-compatibility-assessment.md` | ~160 |
 | `docs/planning/phase2-roadmap.md` | (updated, Wave 2 section) |
@@ -94,16 +94,16 @@ All 54 requirements (REQ-W2.1.1 through REQ-W2.9.9) have at least one numbered a
 
 ### Gate 2: Every task maps to at least one requirement
 **Result: PASS**
-Traceability table in `tasks.md` maps all 12 tasks (W2.T1–W2.T12) to their requirements. Every requirement area (W2.1–W2.9) is covered by at least one task.
+Traceability table in `tasks.md` maps all 14 tasks (W2.T1–W2.T14) to their requirements. Every requirement area (W2.1–W2.9) is covered by at least one task.
 
 ### Gate 3: Approval rules in W2.7 / `SpecificationApprovalService` consistent with Wave 1 invariants
 **Result: PASS**
-- Digest binding: `parameters_hash = sha256(version_id + content_digest)` (REQ-W2.7.1); consistent with Wave 1 `parameters_hash` (REQ-E3.1).
-- Single-use: `consume_atomic` CAS inherited from Wave 1 (REQ-W2.7.3 ↔ REQ-E3.3, E3.7).
-- TTL: `expires_at = now + APPROVAL_TTL_SECONDS` (REQ-W2.7.1 ↔ REQ-E3.4).
-- Authorization validity: `authorization_expires_at` (REQ-W2.7 ↔ REQ-E3.6).
-- `SpecificationApprovalService.resolve` delegates entirely to Wave 1 `ApprovalService.resolve`; no second incompatible approval system (REQ-W2.7.2).
-- `APPROVAL_EXPIRED` and `APPROVAL_ALREADY_RESOLVED` codes originate from Wave 1 (REQ-W2.7.2.1).
+- Two-path model: standalone path uses `specification_approval_requests` (Wave 2 owns the full transaction); workflow-bound path uses Wave 1 `ApprovalService.resolve` for the human decision and Wave 1 `dispatch_protected_txn` for consumption at executor dispatch time — these are separate transactions.
+- Digest binding: `parameters_hash = sha256(version_id:content_digest)` (standalone); `step.input_digest = canonical_hash(inputs)` (workflow-bound, computed internally by Wave 1). No confusion between the two.
+- Single-use: `consume_atomic` CAS (standalone); `dispatch_protected_txn` CAS (workflow-bound, Wave 1).
+- Digest mismatch at `resolve_bound` time: spec stays at `"ready_for_approval"`, Wave 1 `ApprovalRequest` NOT reversed, `spec_approval_digest_mismatch` audit event written, fresh approval required.
+- `APPROVAL_EXPIRED` and `APPROVAL_ALREADY_RESOLVED` for bound approvals originate from Wave 1 `ApprovalService`; Wave 2 does not re-implement them.
+- `is_implementation_authorized`: checks `SpecificationVersion.status = "approved"` + `verify_digest()` + (standalone only) `consumed_at IS NOT NULL`.
 
 ### Gate 4: SDK assumptions in W2.3 / MCPClientAdapter reference actual declared versions
 **Result: PASS (with caveat)**

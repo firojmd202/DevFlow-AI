@@ -1,17 +1,18 @@
 # DevFlow AI — Phase 2 Wave 2: AI Specification Generation and Review Design
 
-**Version:** 1.5.0
-**Status:** Draft — Approval integration clarified (corrections A1–A6)
+**Version:** 1.6.0
+**Status:** Final — Approval-contract aligned, PR-ready
 **Scope:** Phase 2 Wave 2 — AI Specification Generation and Review
 **Branch:** `feature/phase2-wave2-ai-spec-generation`
 **Base commit:** `b3b37ff` (Wave 1 implementation merged, develop HEAD)
 **Last Updated:** 2026-11-18
-**Companion:** `requirements.md` (v1.5.0), `tasks.md` (v1.5.0).
+**Companion:** `requirements.md` (v1.6.0), `tasks.md` (v1.6.0).
 
 **Version history:**
 - v1.0.0–v1.3.0 — See prior version history.
 - v1.4.0 — 2026-11-18 — Implementation-contract alignment: C1–C6.
-- v1.5.0 — 2026-11-18 — Approval integration clarification: A1 (SpecApproverExecutor does not exist in Wave 1 registry; hardcoded mock-only guard confirmed; claim removed), A2 (SpecGeneratorExecutor and SpecReviewerExecutor are Wave 2 implementation tasks requiring ExecutorRegistry.register() extension), A3 (is_implementation_authorized aligned to actual orchestrator approval-gate query), A4 (workflow-bound parameters_hash is step.input_digest, not Wave 2 spec hash), A5 (W2.T14 task added for ExecutorRegistry extension and new executor registration), A6 (targeted tests added for approval lifecycle and downstream authorization).
+- v1.5.0 — 2026-11-18 — Approval integration clarification: A1–A6.
+- v1.6.0 — 2026-11-18 — Final approval-contract alignment: B (REQ-W2.7.3.2 corrected — workflow-bound `consumed_at` set at dispatch time, not at `resolve_bound`; four approval concepts defined in §3.9), C (digest-mismatch in `resolve_bound` fully defined — ApprovalRequest already resolved before digest check; on mismatch spec stays at `"ready_for_approval"`, Wave 1 approval NOT reversed, fresh approval required, failure audited), D (readiness report gate 2 updated to 14 tasks).
 
 ---
 
@@ -331,7 +332,16 @@ Manages the `specification_versions` and `specification_artifacts` tables.
 
 Handles both approval paths. The workflow-bound path delegates to Wave 1 `ApprovalService`. The standalone path manages `specification_approval_requests` directly via `SpecificationApprovalRepository`.
 
-**F-FIN-3:** `SpecificationRequest.workflow_run_id` (not the old `workflow_id`) is the FK linking to a `WorkflowRun` instance. See §8.1 for the corrected column name.
+**B — Four distinct approval concepts (source-verified):**
+
+| Concept | What it is | Who owns it | When it happens |
+|---|---|---|---|
+| **1. Human-approved specification** | `SpecificationVersion.status = "approved"` | Wave 2 | When `resolve_standalone` or `resolve_bound` succeeds after digest verification |
+| **2. Workflow-bound approval resolution** | `ApprovalRequest.status = "approved"`, `authorization_expires_at` set | Wave 1 (`ApprovalService.resolve`) | When the human clicks Approve for a workflow-linked spec |
+| **3. Protected executor dispatch authorization** | `ApprovalRequest.consumed_at` set | Wave 1 (`dispatch_protected_txn`) | When the orchestrator dispatches the gated step — **separate event from #2** |
+| **4. Implementation-authorization check** | `is_implementation_authorized()` returns `True` | Wave 2 | Before any downstream Wave 3 task begins |
+
+Concepts 2 and 3 are **always separate transactions** in different HTTP request cycles. Concept 1 (spec transition to `"approved"`) happens at concept 2 time, not concept 3 time. No Wave 2 code path conflates these.
 
 **F-FIN-4:** The `ApprovalOperation` Literal in `src/devflow_api/schemas/workflow_template.py` is the closed enum `{"specification_approval", "implementation_authorization", "pr_creation_approval", "merge_approval"}`. The value `"approve_specification"` does **not** exist and would fail Pydantic validation if passed to any Wave 1 path. The workflow-bound approval gate requires the step template to have `protected_operation = "specification_approval"`. The standalone `specification_approval_requests.operation` column is a free `TEXT NOT NULL DEFAULT 'approve_specification'` — it does NOT use the `ApprovalOperation` enum, is not validated by Wave 1, and is specific to Wave 2.
 
@@ -395,21 +405,38 @@ COMMIT
 
 `resolve_bound(approval_id, decision, resolved_by) → None`:
 
-**C2 — Separation of concerns.** For the workflow-bound path, Wave 1 uses a two-phase model: (1) **human decision** (`ApprovalService.resolve`) records `status = "approved"` and sets `authorization_expires_at`; (2) **executor dispatch** (`WorkflowStepRunRepository.dispatch_protected_txn`) consumes the approval atomically when the protected step is about to run. These are distinct operations at different times.
+**C2/C — Separation of concerns and digest-mismatch handling.**
 
-`resolve_bound` handles phase (1) only. It MUST NOT attempt to consume the approval or call `dispatch_protected_txn`. Wave 1 `ApprovalRepository.consume_atomic` is not called here.
+The workflow-bound path uses a two-phase model: (1) `ApprovalService.resolve()` records the human decision; (2) `dispatch_protected_txn` consumes the approval at executor dispatch time. `resolve_bound` handles phase (1) only.
+
+**Important:** `ApprovalService.resolve()` completes and commits before the digest check runs. If the digest check then fails, the `ApprovalRequest` has already been resolved to `"approved"` by Wave 1. Wave 2 MUST NOT attempt to reverse or undo that Wave 1 state. Instead it leaves the approval resolved (Wave 1 owns it) and blocks the spec from transitioning to `"approved"`. The user must correct the artifact and request a fresh approval.
 
 Pseudocode:
 ```
--- Phase 1: record the human decision (delegated entirely to Wave 1)
+-- Phase 1: record the human decision (Wave 1 commits this independently)
 approval, run = await ApprovalService.resolve(approval_id, decision, resolved_by)
--- ApprovalService.resolve transitions approval.status and sets authorization_expires_at.
--- It does NOT set consumed_at. consumed_at is set by dispatch_protected_txn at executor time.
+-- approval.status is now "approved"; authorization_expires_at is set.
+-- consumed_at is NOT set here; it is set by dispatch_protected_txn at executor dispatch time.
 
 if decision == "approved":
-  -- Verify spec digest before transitioning spec state
+  -- Digest check runs AFTER Wave 1 resolve has committed.
+  -- If it fails, the ApprovalRequest stays "approved"; only the spec transition is blocked.
   ok = SpecificationVersionRepository.verify_digest(version_id)
-  if not ok: raise SPEC_DIGEST_MISMATCH
+  if not ok:
+    BEGIN IMMEDIATE
+      AuditLogRepository.log_event(
+          "spec_approval_digest_mismatch",
+          actor,
+          workflow_run_id=run.id,
+          payload={"specification_version_id": version_id,
+                   "approval_id": approval_id,
+                   "reason": "content_digest_changed_since_approval"},
+          commit=False)
+    COMMIT
+    raise SPEC_DIGEST_MISMATCH
+    -- spec remains at "ready_for_approval"; Wave 1 ApprovalRequest stays "approved"
+    -- (not reversed). User must fix artifacts and request a fresh approval;
+    -- the existing approval's authorization_expires_at will prevent dispatch.
   BEGIN IMMEDIATE
     SpecificationVersionRepository.transition_status(
         version_id, from_status="ready_for_approval",
@@ -426,7 +453,7 @@ else:  -- rejected
   COMMIT
 ```
 
-**Wave 1 consumption note (A4):** When the Wave 1 orchestrator dispatches a workflow step with `approvable = True`, it queries for an `ApprovalRequest` with `parameters_hash == step.input_digest` (the step's canonical input hash, computed by `ApprovalService.request_bound_approval` internally). The orchestrator then calls `WorkflowStepRunRepository.dispatch_protected_txn` which atomically sets `consumed_at`. This is entirely owned by Wave 1; Wave 2 does not call or replicate it. The approval step in a workflow template does not require a custom `SpecApproverExecutor` — any executor on a step with `approvable = True` and `protected_operation = "specification_approval"` triggers this mechanism.
+**Wave 1 consumption note (A4):** When the Wave 1 orchestrator dispatches a workflow step with `approvable = True`, it queries for an `ApprovalRequest` with `parameters_hash == step.input_digest` (the step's canonical input hash, computed by `ApprovalService.request_bound_approval` internally). The orchestrator then calls `WorkflowStepRunRepository.dispatch_protected_txn` which atomically sets `consumed_at`. This is entirely owned by Wave 1; Wave 2 does not call or replicate it.
 
 `is_implementation_authorized(request_id) → bool`:
 
@@ -989,6 +1016,7 @@ Wave 2 uses these `event_type` values:
 | `spec_approved` | Spec transitions to `Approved` | `specification_request_id`, `specification_version_id`, `approval_id`, `parameters_hash`, `actor_id` |
 | `spec_approval_rejected` | Approval rejected | `specification_request_id`, `specification_version_id`, `approval_id`, `reason`, `actor_id` |
 | `spec_approval_expired` | Approval expired | `specification_request_id`, `specification_version_id`, `approval_id` |
+| `spec_approval_digest_mismatch` | `resolve_bound` digest check failed after Wave 1 resolve committed | `specification_version_id`, `approval_id`, `reason` |
 | `spec_revision_created` | New draft version started | `specification_request_id`, `prior_version`, `new_version`, `actor_id` |
 | `mcp_tool_invoked` | MCP tool call (with argument_hash) | `specification_request_id`, `server_name`, `tool_name`, `argument_hash`, `result_status` |
 

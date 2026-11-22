@@ -1,7 +1,7 @@
 # DevFlow AI — Phase 2 Wave 2: AI Specification Generation and Review Requirements
 
-**Version:** 1.5.0
-**Status:** Draft — Approval integration clarified (corrections A1–A6)
+**Version:** 1.6.0
+**Status:** Final — Approval-contract aligned, PR-ready
 **Scope:** Phase 2 Wave 2 — AI Specification Generation and Review
 **Branch:** `feature/phase2-wave2-ai-spec-generation`
 **Base commit:** `b3b37ff` (Wave 1 implementation merged, develop HEAD)
@@ -9,8 +9,8 @@
 **Supersedes:** None (first Wave 2 specification). Extends `.kiro/specs/phase2-wave1-workflow-execution-engine/` (v2.1.4); does not modify it.
 
 **Version history:**
-- v1.0.0–v1.4.0 — See prior version history.
-- v1.5.0 — 2026-11-18 — Approval integration clarification: A1/A2 (REQ-W2.7.5 is_implementation_authorized aligned to actual orchestrator checks; no SpecApproverExecutor claim), A3 (REQ-W2.7.5 ACs updated), A6 (REQ-W2.7.2/W2.7.3 targeted ACs for approved-not-consumed, consumed, expired-authorization, failed dispatch, replay).
+- v1.0.0–v1.5.0 — See prior version history.
+- v1.6.0 — 2026-11-18 — Final approval-contract alignment: B (REQ-W2.7.3 corrected — workflow-bound `consumed_at` is set at dispatch time, not at `resolve_bound` time; two-phase model explicit), C (REQ-W2.7.2 digest-mismatch: on mismatch spec stays at `"ready_for_approval"`, Wave 1 approval NOT reversed, failure audited as `spec_approval_digest_mismatch`, fresh approval required; test added), D (requirements count confirmed 54).
 
 ---
 
@@ -451,19 +451,20 @@ W2.7.2.3 — `SpecificationVersion.status` transitions to `"approved"` only afte
 W2.7.2.4 — `approved_at` is set to `datetime.now(UTC)`; exactly one of `spec_standalone_approval_id` or `spec_bound_approval_id` is set on the `SpecificationVersion` row.
 W2.7.2.5 — For the standalone path, `consume_atomic`, `verify_digest`, `transition_status("approved")`, and `log_event("spec_approved")` all execute within the same `BEGIN IMMEDIATE` transaction; a failure in any step rolls back all of them.
 W2.7.2.6 — For the workflow-bound path, Wave 2 MUST NOT call `ApprovalRepository.consume_atomic` or `WorkflowStepRunRepository.dispatch_protected_txn`; these are Wave 1 operations.
+W2.7.2.7 — **C: Digest-mismatch in workflow-bound path:** When `verify_digest` fails after `ApprovalService.resolve()` has already committed, the `ApprovalRequest` MUST NOT be reversed or cancelled by Wave 2. `SpecificationVersion.status` MUST remain at `"ready_for_approval"`. A `spec_approval_digest_mismatch` audit event MUST be written. HTTP 409 `SPEC_DIGEST_MISMATCH` is returned to the caller. A fresh approval must be requested after correcting the artifacts.
 
 ### REQ-W2.7.3
 WHEN an approval is single-use,
 THEN each approval record MUST be consumed at most once. The enforcement mechanism differs by path:
 
-- **Standalone path:** `SpecificationApprovalRepository.consume_atomic` uses `BEGIN IMMEDIATE` with a CAS `UPDATE … WHERE id = ? AND consumed_at IS NULL`; if `rowcount == 0` the concurrent caller raises `APPROVAL_ALREADY_RESOLVED`. `rejected_at IS NOT NULL` is also treated as already-resolved.
-- **Workflow-bound path:** inherits the Wave 1 `ApprovalRequest.consumed_at` CAS mechanism (`UPDATE … WHERE consumed_at IS NULL`).
+- **Standalone path:** `SpecificationApprovalRepository.consume_atomic` uses `BEGIN IMMEDIATE` with a CAS `UPDATE … WHERE id = ? AND consumed_at IS NULL`; if `rowcount == 0` the concurrent caller raises `APPROVAL_ALREADY_RESOLVED`. `rejected_at IS NOT NULL` is also treated as already-resolved. Consumption is atomic with the spec-status transition (C1).
+- **Workflow-bound path:** `ApprovalRequest.consumed_at` is set by `WorkflowStepRunRepository.dispatch_protected_txn` at **executor dispatch time** — a separate database transaction from `resolve_bound`. This is Wave 1's consumption gate and occurs after the human-decision phase (concept 2) in a later HTTP request cycle.
 
 A second attempt to use the same approval returns HTTP 409 `APPROVAL_ALREADY_RESOLVED` on either path.
 
 **Acceptance Criteria:**
 W2.7.3.1 — Concurrent resolution of the same standalone approval: exactly one succeeds; the other raises `APPROVAL_ALREADY_RESOLVED` (HTTP 409).
-W2.7.3.2 — `consumed_at` (standalone) or `ApprovalRequest.consumed_at` (bound) is set atomically in the same transaction as the `Approved` status transition on `specification_versions`.
+W2.7.3.2 — **Standalone path:** `consumed_at` is set atomically in the same `BEGIN IMMEDIATE` transaction as the `Approved` status transition on `specification_versions`. **Workflow-bound path:** `ApprovalRequest.consumed_at` is set by `dispatch_protected_txn` at executor dispatch time — this is a separate transaction from `resolve_bound`; they are never in the same transaction.
 W2.7.3.3 — No code path clears `consumed_at` or `rejected_at` after they are set.
 
 ### REQ-W2.7.4
