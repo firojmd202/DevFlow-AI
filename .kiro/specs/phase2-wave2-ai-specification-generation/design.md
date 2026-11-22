@@ -1,16 +1,17 @@
 # DevFlow AI — Phase 2 Wave 2: AI Specification Generation and Review Design
 
-**Version:** 1.1.0
-**Status:** Draft — Review findings addressed (F1–F17)
+**Version:** 1.2.0
+**Status:** Draft — Review findings addressed (F1–F17, F-NEW-1 through F-NEW-5)
 **Scope:** Phase 2 Wave 2 — AI Specification Generation and Review
 **Branch:** `feature/phase2-wave2-ai-spec-generation`
 **Base commit:** `b3b37ff` (Wave 1 implementation merged, develop HEAD)
 **Last Updated:** 2026-11-18
-**Companion:** `requirements.md` (v1.1.0), `tasks.md` (v1.1.0).
+**Companion:** `requirements.md` (v1.2.0), `tasks.md` (v1.2.0).
 
 **Version history:**
 - v1.0.0 — 2026-11-18 — Initial Wave 2 design draft.
 - v1.1.0 — 2026-11-18 — Review findings addressed: F1 (OllamaProvider uses httpx directly, not OllamaAdapter), F2 (audit payload_json keys, no new columns on workflow_audit_log), F3 (standalone approval path), F4 (timeout conflict resolved), F5 (_authorized context manager pattern), F6 (cancellation routes added), F7 (Under Review transition rule unified), F8 (output schemas defined), F9 (parameters_hash canonical definition), F10 (recovery status transitions), F12 (HTTP 499 replaced with 409), F13 (SpecificationVersion creation timing), F14 (MCP schema registration), F15 (content_digest canonical separator), F17 (W2.T4 no longer depends on W2.T2).
+- v1.2.0 — 2026-11-18 — Review findings addressed: F-NEW-1 (standalone approval uses new specification_approval_requests table, not approval_requests), F-NEW-2 (workflow_step_id column added to specification_requests), F-NEW-3 (request_bound_approval call signature corrected), F-NEW-4 (artifact_hash formula uses \\n---\\n separator), F-NEW-5 (3 missing error codes added to §10 failure modes table).
 
 ---
 
@@ -76,7 +77,8 @@ Wave 2 adds a specification generation and review capability on top of the Wave 
   │                                                 │ + generation_attempts              │
   │                                                 │ + review_attempts                  │
   │                                                 │ + review_findings                  │
-  │                                                 │ + approval_requests (Wave 1, ext.) │
+  │                                                 │ + specification_approval_requests  │
+  │                                                 │ + approval_requests (Wave 1)       │
   │                                                 │ + workflow_audit_log (Wave 1)      │
   │                                                 └────────────────────┘             │
   │  External: Ollama localhost (default) | OpenAI API (optional, explicit config only) │
@@ -326,25 +328,31 @@ Manages the `specification_versions` and `specification_artifacts` tables.
 
 **Location:** `src/devflow_api/services/specification_approval.py`
 
-Delegates to Wave 1 `ApprovalService` for all approval mechanics; adds spec-specific pre/post-conditions.
+Delegates to Wave 1 `ApprovalService` for the workflow-bound path; uses a new `SpecificationApprovalRepository` for the standalone path. Adds spec-specific pre/post-conditions.
 
 **Key methods:**
 
-`request_approval(version_id, actor_id) → ApprovalRequest`:
-- Calls `ApprovalService.request_bound_approval(...)` with `operation = "approve_specification"`, **`parameters_hash` computed as the canonical definition (F9): `hashlib.sha256(f"{version_id}:{content_digest}".encode("utf-8")).hexdigest()`** — colon separator between `version_id` (integer, str-formatted) and `content_digest` (64-char hex string). This definition is canonical; it MUST be used identically in REQ-W2.7.1 and task W2.T7.
-- For the **standalone path (F3)**: when `SpecificationRequest.workflow_id IS NULL` (no linked workflow step), `SpecificationApprovalService.request_approval` calls `ApprovalService.request_standalone_approval(operation, parameters_hash, actor_id, expires_at)` — a new method on `ApprovalService` that creates an `ApprovalRequest` with `workflow_run_id = NULL` and `workflow_step_run_id = NULL`. This path is defined here because Phase 2 `SpecificationApprovalService` MUST NOT create `ApprovalRequest` rows directly. `ApprovalService.request_standalone_approval` is added in W2.T7 as a minimal additive extension; it MUST reuse the same `BEGIN IMMEDIATE` insertion logic as `request_bound_approval` and MUST NOT duplicate approval validity or TTL logic.
+`request_approval(version_id, actor_id) → ApprovalRequest | SpecificationApprovalRequest`:
+- **`parameters_hash`** (canonical definition, F9): `hashlib.sha256(f"{version_id}:{content_digest}".encode("utf-8")).hexdigest()` — colon separator between `version_id` (integer, str-formatted) and `content_digest` (64-char hex string). This definition is used in both paths below; it MUST be used identically in REQ-W2.7.1 and task W2.T7.
+- **Standalone approval path** (when `SpecificationRequest.workflow_id IS NULL`):
+  `SpecificationApprovalService` creates a row in the new `specification_approval_requests` table (not `approval_requests`) via `SpecificationApprovalRepository.create`. Fields: `specification_version_id`, `parameters_hash`, `actor_id`, `operation="approve_specification"`, `created_at`, `expires_at` (default: `now + Settings.APPROVAL_EXPIRY_SECONDS`), `consumed_at = NULL`. Single-use: `consumed_at` is set atomically by `SpecificationApprovalRepository.consume_atomic` (CAS: `consumed_at IS NULL`). Rejection: sets `rejected_at`.
+- **Workflow-bound approval path** (when `SpecificationRequest.workflow_id IS NOT NULL`):
+  Call `ApprovalService.request_bound_approval(run_id=spec_request.workflow_id, step_run_id=spec_request.workflow_step_id)` with no additional parameters. `request_bound_approval` derives `operation`, `expires_at`, and `parameters_hash` internally from the step template. Prerequisite: the linked workflow step template must have `protected_operation = "approve_specification"` configured.
+
+  > **Note:** `request_bound_approval` derives `operation`, `parameters_hash`, `expires_at`, and `actor_id` internally from the workflow step template. For this call to produce `operation = 'approve_specification'`, the linked workflow step template MUST have `protected_operation = 'approve_specification'` set in its definition. This is a configuration prerequisite for the workflow-bound path; it is not enforced by `SpecificationApprovalService` at runtime.
+
 - Transitions `SpecificationVersion.status` to `Ready for Approval`.
-- For the **workflow-bound path**: when `SpecificationRequest.workflow_id` is set and the spec is running inside a Wave 1 workflow step with a `workflow_step_run_id`, the existing `ApprovalService.request_bound_approval(run_id, step_run_id, operation, parameters_hash, actor_id, expires_at)` is used unchanged.
 
 `resolve(approval_id, decision, resolved_by) → None`:
-- Delegates to `ApprovalService.resolve(approval_id, decision, resolved_by)`.
+- **Standalone path:** delegates to `SpecificationApprovalRepository.consume_atomic` (approved) or sets `rejected_at` (rejected).
+- **Workflow-bound path:** delegates to `ApprovalService.resolve(approval_id, decision, resolved_by)`.
 - On `approved`: verifies digest (REQ-W2.6.2), transitions spec to `Approved`, sets `approved_at`/`approved_by`/`approval_id`.
 - On `rejected`: transitions spec to `Revision Required`, writes `spec_approval_rejected` audit.
 
 `is_implementation_authorized(request_id) → bool`:
 - Checks: approved version exists, digest matches, approval not revoked.
 
-**Invariant:** `SpecificationApprovalService` MUST NOT create `ApprovalRequest` rows directly. All approval row creation goes through `ApprovalService`.
+**Invariant:** `SpecificationApprovalService` MUST NOT create `ApprovalRequest` rows (in the `approval_requests` table) directly. The standalone path uses `SpecificationApprovalRepository` to write to `specification_approval_requests`. The workflow-bound path goes through `ApprovalService`.
 
 ---
 
@@ -395,6 +403,7 @@ class SpecificationRequestCreate(BaseModel):
     repo_context: str | None = None
     clarifying_questions: list[str] = []
     workflow_id: int | None = None
+    workflow_step_id: int | None = None
     provider_id: str = "ollama"
     model_id: str | None = None
 ```
@@ -584,6 +593,7 @@ specification_requests
   repo_context             TEXT
   clarifying_questions     TEXT  -- JSON array
   workflow_id              INTEGER REFERENCES workflows(id) ON DELETE SET NULL
+  workflow_step_id         INTEGER NULL REFERENCES workflow_step_runs(id) ON DELETE SET NULL
   status                   TEXT NOT NULL DEFAULT 'draft'
                            CHECK(status IN ('draft','generating','generated',
                                             'under_review','revision_required',
@@ -676,7 +686,7 @@ review_attempts
   specification_version_id     INTEGER NOT NULL REFERENCES specification_versions(id) ON DELETE CASCADE
   provider_id                  TEXT NOT NULL
   model_id                     TEXT NOT NULL
-  artifact_hash                TEXT NOT NULL  -- SHA-256 of concatenated artifact content
+  artifact_hash                TEXT NOT NULL  -- sha256((requirements_text + "\n---\n" + design_text + "\n---\n" + tasks_text).encode("utf-8")).hexdigest()
   cancellation_requested       INTEGER NOT NULL DEFAULT 0  -- boolean; set by DELETE /{id}/review (F6)
   status                       TEXT NOT NULL DEFAULT 'pending'
                                CHECK(status IN ('pending','running','succeeded','failed','cancelled'))
@@ -707,7 +717,26 @@ review_findings
   created_at                UTCDateTime NOT NULL
 ```
 
-### 8.8 `AuditEvent` (reuses `WorkflowAuditLog`)
+### 8.8 `SpecificationApprovalRequest` (standalone approval path only)
+
+**F-NEW-1 resolution:** The standalone approval path MUST NOT use the `approval_requests` table because `ApprovalRequest.workflow_run_id` is `Mapped[int]` (NOT NULL) and `ApprovalRepository.create_bound` enforces non-null `workflow_run_id`. A new independent table `specification_approval_requests` is introduced for standalone approvals (when `SpecificationRequest.workflow_id IS NULL`).
+
+```
+specification_approval_requests
+  id                       INTEGER PRIMARY KEY AUTOINCREMENT
+  specification_version_id INTEGER NOT NULL REFERENCES specification_versions(id) ON DELETE CASCADE
+  operation                TEXT NOT NULL DEFAULT 'approve_specification'
+  parameters_hash          TEXT NOT NULL
+  actor_id                 TEXT NOT NULL
+  created_at               DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+  expires_at               DATETIME NOT NULL
+  consumed_at              DATETIME NULL
+  rejected_at              DATETIME NULL
+```
+
+This table does NOT use `workflow_run_id` or `workflow_step_run_id`; it is fully independent of the Wave 1 approval chain.
+
+### 8.9 `AuditEvent` (reuses `WorkflowAuditLog`)
 
 Wave 2 audit events are written to the existing `workflow_audit_log` table (Wave 1). No new audit table is created. The `workflow_audit_log` table has columns: `id`, `workflow_run_id`, `event_type`, `actor`, `payload_json`, `created_at`.
 
@@ -776,6 +805,7 @@ CREATE TABLE specification_requests (
     repo_context TEXT,
     clarifying_questions TEXT,
     workflow_id INTEGER REFERENCES workflows(id) ON DELETE SET NULL,
+    workflow_step_id INTEGER REFERENCES workflow_step_runs(id) ON DELETE SET NULL,
     status TEXT NOT NULL DEFAULT 'draft'
         CHECK(status IN ('draft','generating','generated','under_review',
                          'revision_required','ready_for_approval','approved','cancelled')),
@@ -875,6 +905,21 @@ CREATE TABLE review_findings (
     acknowledged_at TEXT,
     created_at TEXT NOT NULL
 );
+
+CREATE TABLE specification_approval_requests (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    specification_version_id INTEGER NOT NULL
+        REFERENCES specification_versions(id) ON DELETE CASCADE,
+    operation TEXT NOT NULL DEFAULT 'approve_specification',
+    parameters_hash TEXT NOT NULL,
+    actor_id TEXT NOT NULL,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    expires_at DATETIME NOT NULL,
+    consumed_at DATETIME NULL,
+    rejected_at DATETIME NULL
+);
+-- Note: this table does NOT use workflow_run_id or workflow_step_run_id;
+-- it is fully independent of the Wave 1 approval chain.
 ```
 
 ### 9.2 Indexes Created by 009

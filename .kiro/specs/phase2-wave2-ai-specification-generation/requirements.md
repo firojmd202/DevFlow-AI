@@ -1,7 +1,7 @@
 # DevFlow AI — Phase 2 Wave 2: AI Specification Generation and Review Requirements
 
-**Version:** 1.1.0
-**Status:** Draft — Review findings addressed (F1–F7, F9, F10, F12, F13, F15, F17)
+**Version:** 1.2.0
+**Status:** Draft — Review findings addressed (F1–F7, F9, F10, F12, F13, F15, F17, F-NEW-1 through F-NEW-5)
 **Scope:** Phase 2 Wave 2 — AI Specification Generation and Review
 **Branch:** `feature/phase2-wave2-ai-spec-generation`
 **Base commit:** `b3b37ff` (Wave 1 implementation merged, develop HEAD)
@@ -11,6 +11,7 @@
 **Version history:**
 - v1.0.0 — 2026-11-18 — Initial Wave 2 specification draft.
 - v1.1.0 — 2026-11-18 — Review findings addressed: F1 (OllamaProvider uses httpx directly), F2 (audit payload_json keys, no new columns), F3 (standalone approval path, two-path documentation), F4 (timeout conflict resolved), F5 (_authorized context manager requirement added to REQ-W2.3.2), F6 (cancellation routes added to REQ-W2.8.1 and REQ-W2.8.2), F7 (Under Review transition rule unified), F9 (parameters_hash canonical definition in REQ-W2.7.1), F10 (recovery status transitions, W2.9.9.4 added), F11 (char/4 heuristic + test criterion), F12 (HTTP 499 replaced with 409), F13 (SpecificationVersion creation timing), F15 (content_digest canonical separator), F17 (W2.T4 no longer depends on W2.T2).
+- v1.2.0 — 2026-11-18 — Review findings addressed: F-NEW-1 (REQ-W2.7.1 updated: standalone approval uses specification_approval_requests table), F-NEW-2 (workflow_step_id column noted; no change needed here — REQ-W2.7.1 already references workflow_step_id correctly), F-NEW-4 (REQ-W2.5.5 AC W2.5.5.2 updated with canonical artifact_hash formula), F-NEW-5 (REQ-W2.8.3 error table extended with 3 missing codes).
 
 ---
 
@@ -351,7 +352,7 @@ THEN the system MUST persist a `ReviewAttempt` with: `id`, `specification_versio
 
 **Acceptance Criteria:**
 W2.5.5.1 — `ReviewAttempt` row is created before the AI call.
-W2.5.5.2 — `artifact_hash` matches `sha256(requirements_text + design_text + tasks_text)` (concatenated in fixed order).
+W2.5.5.2 — `artifact_hash` is computed as `sha256((requirements_text + "\n---\n" + design_text + "\n---\n" + tasks_text).encode("utf-8")).hexdigest()`, matching the `content_digest` formula. Concatenation uses `\n---\n` as the separator between artifact texts (fixed order: requirements, design, tasks).
 W2.5.5.3 — Artifact text is NEVER stored in any database column; only the hash is persisted.
 
 ---
@@ -419,17 +420,17 @@ W2.6.4.3 — Creating a new version after approval preserves the approved versio
 
 ### REQ-W2.7.1
 WHEN a specification reaches `Ready for Approval`,
-THEN the system MUST create an `ApprovalRequest` using the Wave 1 `ApprovalService`. The approval MUST bind to: `operation = "approve_specification"`, `parameters_hash` (canonical SHA-256 as defined in design §3.9: `sha256(f"{version_id}:{content_digest}".encode("utf-8")).hexdigest()` — colon separator), `actor_id = Settings.LOCAL_OPERATOR_ID`, `expires_at = now + Settings.APPROVAL_TTL_SECONDS`.
+THEN the system MUST create an approval record using the appropriate path based on whether the spec request is linked to a workflow. The approval MUST bind to: `operation = "approve_specification"`, `parameters_hash` (canonical SHA-256 as defined in design §3.9: `sha256(f"{version_id}:{content_digest}".encode("utf-8")).hexdigest()` — colon separator), `actor_id = Settings.LOCAL_OPERATOR_ID`, `expires_at = now + Settings.APPROVAL_EXPIRY_SECONDS`.
 
-**F3 — Two approval paths:**
-- **Workflow-bound path** (when `SpecificationRequest.workflow_id IS NOT NULL`): call `ApprovalService.request_bound_approval(run_id=spec_request.workflow_id, step_run_id=spec_request.workflow_step_id)`.
-- **Standalone path** (when `SpecificationRequest.workflow_id IS NULL`): call `ApprovalService.request_standalone_approval(operation, parameters_hash, actor_id, expires_at)`, which creates an `ApprovalRequest` with `workflow_run_id = NULL` and `workflow_step_run_id = NULL`. `SpecificationApprovalService` MUST NOT create `ApprovalRequest` rows directly in either path.
+**Two approval paths:**
+- **Standalone path** (when `SpecificationRequest.workflow_id IS NULL`): `SpecificationApprovalService` creates a row in the `specification_approval_requests` table (not `approval_requests`) via `SpecificationApprovalRepository.create`. This table is introduced in migration 009 and is fully independent of the Wave 1 approval chain (no `workflow_run_id` or `workflow_step_run_id`). Single-use consumption is enforced by `SpecificationApprovalRepository.consume_atomic` (CAS: `consumed_at IS NULL`). Rejection sets `rejected_at`.
+- **Workflow-bound path** (when `SpecificationRequest.workflow_id IS NOT NULL`): call `ApprovalService.request_bound_approval(run_id=spec_request.workflow_id, step_run_id=spec_request.workflow_step_id)`. `SpecificationApprovalService` MUST NOT create `ApprovalRequest` rows (in `approval_requests`) directly in either path.
 
 **Acceptance Criteria:**
-W2.7.1.1 — The `ApprovalRequest` row carries `operation = "approve_specification"` and a `parameters_hash` matching the canonical formula `sha256(f"{version_id}:{content_digest}".encode("utf-8")).hexdigest()`.
-W2.7.1.2 — The approval expires after `APPROVAL_TTL_SECONDS` seconds; resolution after expiry returns HTTP 409 `APPROVAL_EXPIRED`.
-W2.7.1.3 — `SpecificationApprovalService` calls `ApprovalService.request_bound_approval` or `ApprovalService.request_standalone_approval`; it does NOT create `ApprovalRequest` rows directly.
-W2.7.1.4 — When `workflow_id IS NULL`, the resulting `ApprovalRequest` has `workflow_run_id = NULL` and `workflow_step_run_id = NULL`.
+W2.7.1.1 — The standalone path creates a row in `specification_approval_requests` with `operation = "approve_specification"` and `parameters_hash` matching `sha256(f"{version_id}:{content_digest}".encode("utf-8")).hexdigest()`.
+W2.7.1.2 — The approval expires after `APPROVAL_EXPIRY_SECONDS` seconds; resolution after expiry returns HTTP 409 `APPROVAL_EXPIRED`.
+W2.7.1.3 — The workflow-bound path calls `ApprovalService.request_bound_approval(run_id=spec_request.workflow_id, step_run_id=spec_request.workflow_step_id)`; it does NOT create `ApprovalRequest` rows directly.
+W2.7.1.4 — When `workflow_id IS NULL`, the resulting approval row is in `specification_approval_requests` and has no `workflow_run_id` or `workflow_step_run_id` columns.
 
 ### REQ-W2.7.2
 WHEN a specification approval is resolved,
@@ -539,6 +540,9 @@ THEN the API MUST return documented error codes for all named failure states:
 | `INVALID_SPEC_TRANSITION` | 409 | Illegal lifecycle state transition |
 | `APPROVAL_EXPIRED` | 409 | Approval TTL elapsed (from Wave 1) |
 | `APPROVAL_ALREADY_RESOLVED` | 409 | Approval already resolved (from Wave 1) |
+| `GENERATION_ALREADY_IN_PROGRESS` | 409 | POST /generate when a generation attempt is already pending or running |
+| `REVIEW_ALREADY_IN_PROGRESS` | 409 | POST /review when a review attempt is already pending or running |
+| `TASK_NOT_CANCELLABLE` | 409 | DELETE /generate or /review when the attempt is in a terminal state |
 
 **Acceptance Criteria:**
 W2.8.3.1 — Each error code maps to exactly one HTTP status code.

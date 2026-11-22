@@ -1,7 +1,7 @@
 # DevFlow AI — Phase 2 Wave 2: Specification Readiness Report
 
-**Version:** 1.1.0
-**Status:** Draft — Review findings addressed (F1–F7, F9, F10, F12, F13, F15, F17) — Awaiting Second Review
+**Version:** 1.2.0
+**Status:** Draft — Review findings addressed (F1–F7, F9, F10, F12, F13, F15, F17, F-NEW-1 through F-NEW-5) — Awaiting Second Review
 **Branch:** `feature/phase2-wave2-ai-spec-generation`
 **Base commit:** `b3b37ff` (Wave 1 implementation merged, develop HEAD)
 **Last Updated:** 2026-11-18
@@ -12,9 +12,9 @@
 
 | File | Version | Status |
 |---|---|---|
-| `.kiro/specs/phase2-wave2-ai-specification-generation/requirements.md` | 1.1.0 | Draft — findings addressed |
-| `.kiro/specs/phase2-wave2-ai-specification-generation/design.md` | 1.1.0 | Draft — findings addressed |
-| `.kiro/specs/phase2-wave2-ai-specification-generation/tasks.md` | 1.1.0 | Draft — findings addressed |
+| `.kiro/specs/phase2-wave2-ai-specification-generation/requirements.md` | 1.2.0 | Draft — findings addressed |
+| `.kiro/specs/phase2-wave2-ai-specification-generation/design.md` | 1.2.0 | Draft — findings addressed |
+| `.kiro/specs/phase2-wave2-ai-specification-generation/tasks.md` | 1.2.0 | Draft — findings addressed |
 | `docs/reports/phase2-wave2-mcp-compatibility-assessment.md` | 1.0.0 | Draft |
 | `docs/planning/phase2-roadmap.md` | 2.2.0 | Updated (Wave 2 decisions recorded) |
 
@@ -24,9 +24,9 @@
 
 | File | Lines |
 |---|---|
-| `.kiro/specs/phase2-wave2-ai-specification-generation/requirements.md` | 684 |
-| `.kiro/specs/phase2-wave2-ai-specification-generation/design.md` | 1030 |
-| `.kiro/specs/phase2-wave2-ai-specification-generation/tasks.md` | 358 |
+| `.kiro/specs/phase2-wave2-ai-specification-generation/requirements.md` | 688 |
+| `.kiro/specs/phase2-wave2-ai-specification-generation/design.md` | 1075 |
+| `.kiro/specs/phase2-wave2-ai-specification-generation/tasks.md` | 359 |
 | `docs/reports/phase2-wave2-spec-readiness.md` | (this file) |
 | `docs/reports/phase2-wave2-mcp-compatibility-assessment.md` | ~160 |
 | `docs/planning/phase2-roadmap.md` | (updated, Wave 2 section) |

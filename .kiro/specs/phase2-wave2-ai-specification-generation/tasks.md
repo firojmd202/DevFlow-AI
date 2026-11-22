@@ -1,16 +1,17 @@
 # DevFlow AI — Phase 2 Wave 2: AI Specification Generation and Review Tasks
 
-**Version:** 1.1.0
-**Status:** Draft — Review findings addressed (F1, F3, F4, F5, F6, F9, F15, F17)
+**Version:** 1.2.0
+**Status:** Draft — Review findings addressed (F1, F3, F4, F5, F6, F9, F15, F17, F-NEW-1 through F-NEW-5)
 **Scope:** Phase 2 Wave 2 — AI Specification Generation and Review
 **Branch:** `feature/phase2-wave2-ai-spec-generation`
 **Base commit:** `b3b37ff` (Wave 1 implementation merged, develop HEAD)
 **Last Updated:** 2026-11-18
-**Companions:** `requirements.md` (v1.1.0), `design.md` (v1.1.0).
+**Companions:** `requirements.md` (v1.2.0), `design.md` (v1.2.0).
 
 **Version history:**
 - v1.0.0 — 2026-11-18 — Initial Wave 2 task breakdown.
 - v1.1.0 — 2026-11-18 — Review findings addressed: F1 (OllamaProvider uses httpx directly, not OllamaAdapter), F3 (standalone approval path in W2.T7), F4 (Settings fields list clarified in W2.T1), F5 (_authorized context manager test in W2.T3), F6 (cancellation routes in W2.T9), F9 (canonical parameters_hash definition in W2.T7), F15 (content_digest references design §3.8), F17 (W2.T4 no longer depends on W2.T2).
+- v1.2.0 — 2026-11-18 — Review findings addressed: F-NEW-1 (W2.T7 updated: standalone path uses SpecificationApprovalRepository + specification_approval_requests table; W2.T8 updated to include 7th table), F-NEW-4 (W2.T5.5 artifact_hash formula updated to use \\n---\\n separator), F-NEW-5 (W2.T11.9 error code count updated from 12 to 15).
 
 ---
 
@@ -137,7 +138,7 @@ W2.T5.1 — Deterministic check functions are pure (no network, no DB); unit tes
 W2.T5.2 — An artifact missing the required metadata block triggers a deterministic `Critical` finding without any AI call.
 W2.T5.3 — An artifact with no acceptance criteria on a requirement triggers a deterministic `High` finding.
 W2.T5.4 — AI review findings carry `source="ai"` and include the disclaimer string in `recommendation`.
-W2.T5.5 — `ReviewAttempt.artifact_hash = sha256(requirements_text + design_text + tasks_text)` (concatenated in fixed order); test verifies the hash is deterministic.
+W2.T5.5 — `ReviewAttempt.artifact_hash = sha256((requirements_text + "\n---\n" + design_text + "\n---\n" + tasks_text).encode("utf-8")).hexdigest()` (concatenated in fixed order using `\n---\n` as separator, identical to `content_digest`); test verifies the hash is deterministic.
 W2.T5.6 — With a `Critical` finding, `SpecificationVersion.status` transitions to `"revision_required"`.
 W2.T5.7 — With no `Critical` findings, `SpecificationVersion.status` transitions to `"ready_for_approval"`.
 W2.T5.8 — Artifact text is NEVER stored in any database column; only `artifact_hash` is persisted; test verifies.
@@ -185,12 +186,12 @@ parameters_hash = hashlib.sha256(
 
 **F3 — Two approval paths:**
 - **Workflow-bound path** (when `SpecificationRequest.workflow_id` is set): call `ApprovalService.request_bound_approval(run_id=spec_request.workflow_id, step_run_id=spec_request.workflow_step_id)`.
-- **Standalone path** (when `SpecificationRequest.workflow_id IS NULL`): call `ApprovalService.request_standalone_approval(operation, parameters_hash, actor_id, expires_at)` — a new minimal method on `ApprovalService` added in this task; it creates an `ApprovalRequest` with `workflow_run_id = NULL` and `workflow_step_run_id = NULL`, reusing `ApprovalRepository.create_bound` insertion logic.
+- **Standalone path** (when `SpecificationRequest.workflow_id IS NULL`): implement `SpecificationApprovalRepository` with methods `create`, `get`, `consume_atomic` (CAS on `consumed_at IS NULL`), and `reject`. `SpecificationApprovalRepository.create` inserts a row into the new `specification_approval_requests` table (introduced in migration 009). Do NOT use `ApprovalRepository.create_bound` or write to `approval_requests` for this path.
 
 Write all named audit events. Implement `consume_atomic` CAS for single-use approval enforcement (reusing Wave 1 path).
 
 **Acceptance Criteria:**
-W2.T7.1 — **Workflow-bound path:** `request_approval` creates an `ApprovalRequest` via `ApprovalService.request_bound_approval` with `operation = "approve_specification"` when `SpecificationRequest.workflow_id` is set. **Standalone path:** when `workflow_id IS NULL`, `request_approval` calls `ApprovalService.request_standalone_approval`; the resulting `ApprovalRequest` has `workflow_run_id = NULL` and `workflow_step_run_id = NULL`.
+W2.T7.1 — **Workflow-bound path:** `request_approval` calls `ApprovalService.request_bound_approval(run_id=spec_request.workflow_id, step_run_id=spec_request.workflow_step_id)` when `SpecificationRequest.workflow_id` is set. **Standalone path:** when `workflow_id IS NULL`, `request_approval` calls `SpecificationApprovalRepository.create`; a row is inserted into `specification_approval_requests` with `consumed_at = NULL` and `rejected_at = NULL`. No row is written to `approval_requests` for the standalone path.
 W2.T7.2 — `resolve(approved)` delegates to `ApprovalService.resolve`; on success, transitions `SpecificationVersion.status` to `"approved"` and sets `approved_at`, `approved_by`, `approval_id`.
 W2.T7.3 — `resolve(rejected)` transitions spec to `"revision_required"` and writes `spec_approval_rejected` audit event.
 W2.T7.4 — Concurrent resolution test: two simultaneous `resolve(approved)` calls → exactly one succeeds; the other returns `APPROVAL_ALREADY_RESOLVED`.
@@ -209,11 +210,11 @@ W2.T7.9 — All six approval audit events (`spec_approval_requested`, `spec_appr
 **Depends on:** Wave 1 migration `008_add_workflow_execution_engine` (must be verified as head before authoring).
 
 **Description:**
-Author `alembic/versions/009_add_ai_specification_generation.py` chaining from `008`. Create all six tables (`specification_requests`, `specification_versions`, `specification_artifacts`, `generation_attempts`, `review_attempts`, `review_findings`) with CHECK constraints, FKs, and all twelve indexes as specified in design §9. Reversible `downgrade()` drops all six tables and all twelve indexes. Do NOT alter any Phase 0/1/Wave 1 table.
+Author `alembic/versions/009_add_ai_specification_generation.py` chaining from `008`. Create all seven tables (`specification_requests`, `specification_versions`, `specification_artifacts`, `generation_attempts`, `review_attempts`, `review_findings`, `specification_approval_requests`) with CHECK constraints, FKs, and all twelve indexes as specified in design §9. Reversible `downgrade()` drops all seven tables and all twelve indexes. Do NOT alter any Phase 0/1/Wave 1 table.
 
 **Acceptance Criteria:**
 W2.T8.1 — `alembic upgrade head` from `008` reaches `009` with no errors.
-W2.T8.2 — `alembic downgrade -1` from `009` returns to `008` with no errors; all six tables and twelve indexes are dropped.
+W2.T8.2 — `alembic downgrade -1` from `009` returns to `008` with no errors; all seven tables and all twelve indexes are dropped.
 W2.T8.3 — Round-trip `001 → 009 → 001` completes without error (run on a fresh database).
 W2.T8.4 — After `upgrade()`, all Phase 1 rows remain valid; `SELECT COUNT(*) FROM workflows` matches the pre-migration count.
 W2.T8.5 — After `downgrade()`, all Phase 1 rows remain valid.
@@ -283,7 +284,7 @@ W2.T11.5 — No-OpenAI-egress test: `AI_PROVIDER="ollama"` with mocked network c
 W2.T11.6 — Prompt-injection test: injected instruction in `repo_context` does not alter the instruction section of the constructed prompt.
 W2.T11.7 — Startup recovery test: a `GenerationAttempt` left in `"running"` state is recovered to `"failed"` with `error_code="INTERRUPTED"` on simulated restart.
 W2.T11.8 — Concurrent approval test: two simultaneous `resolve(approved)` calls → exactly one succeeds.
-W2.T11.9 — All 12 error codes from REQ-W2.8.3 are covered by at least one test.
+W2.T11.9 — All 15 error codes from REQ-W2.8.3 are covered by at least one test.
 W2.T11.10 — MCP compatibility test: mocked subprocess verifies `MCPClientAdapter` contract without a live MCP server.
 W2.T11.11 — `mypy --strict src/devflow_api/providers/ src/devflow_api/services/specification*.py src/devflow_api/repositories/specification*.py src/devflow_api/routers/specification*.py` exits with code 0.
 W2.T11.12 — `ruff check src/` exits with code 0 on all new Wave 2 files.
