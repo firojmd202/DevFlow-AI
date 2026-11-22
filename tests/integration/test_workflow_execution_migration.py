@@ -46,7 +46,6 @@ def test_migration_008_upgrade_downgrade_and_legacy_roundtrip(
         }
     for _ in range(2):
         command.upgrade(config, "008_add_workflow_execution_engine")
-        command.check(config)
         with closing(sqlite3.connect(sqlite_path)) as db, db:
             assert db.execute("PRAGMA foreign_key_check").fetchall() == []
             assert db.execute(
@@ -98,6 +97,7 @@ def test_migration_008_upgrade_downgrade_and_legacy_roundtrip(
                 >= 100
             )
     command.upgrade(config, "head")
+    command.check(config)
 
 
 def test_migration_008_downgrades_populated_phase2_rows(
@@ -106,7 +106,7 @@ def test_migration_008_downgrades_populated_phase2_rows(
     monkeypatch.setenv("DATABASE_URL", f"sqlite+aiosqlite:///{sqlite_path.as_posix()}")
     get_settings.cache_clear()
     config = Config(str(ROOT / "alembic.ini"))
-    command.upgrade(config, "head")
+    command.upgrade(config, "008_add_workflow_execution_engine")
     with closing(sqlite3.connect(sqlite_path)) as db, db:
         db.execute("PRAGMA foreign_keys=ON")
         db.execute(

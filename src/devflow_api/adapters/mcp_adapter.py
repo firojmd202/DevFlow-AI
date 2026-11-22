@@ -52,6 +52,8 @@ class MCPClientAdapter:
         arguments: dict[str, object],
         *,
         required: bool = True,
+        specification_request_id: int | None = None,
+        workflow_run_id: int | None = None,
     ) -> ContextChunk:
         status = "failed"
         argument_hash = None
@@ -124,16 +126,20 @@ class MCPClientAdapter:
                 content="", server=server_name, tool=tool_name, required=False, truncated=False
             )
         finally:
-            await self._audit.log_event(
-                "mcp_tool_invoked",
-                "system",
-                payload={
-                    "server_name": audit_server,
-                    "tool_name": audit_tool,
-                    "argument_hash": argument_hash,
-                    "result_status": status,
-                },
-            )
+            payload: dict[str, object] = {
+                "server_name": audit_server,
+                "tool_name": audit_tool,
+                "argument_hash": argument_hash,
+                "result_status": status,
+            }
+            if specification_request_id is not None:
+                payload["specification_request_id"] = specification_request_id
+            if workflow_run_id is None:
+                await self._audit.log_event("mcp_tool_invoked", "system", payload=payload)
+            else:
+                await self._audit.log_event(
+                    "mcp_tool_invoked", "system", workflow_run_id, payload=payload
+                )
 
     def _validate_schema(
         self, schema: dict[str, object] | None, arguments: dict[str, object]
