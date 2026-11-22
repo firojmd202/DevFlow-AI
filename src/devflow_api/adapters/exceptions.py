@@ -73,6 +73,22 @@ class MCPPermissionError(DevFlowError):
         super().__init__("MCP permission denied")
 
 
+class MCPToolSchemaError(DevFlowError):
+    """Tool arguments did not satisfy the configured schema."""
+
+    def __init__(self) -> None:
+        super().__init__("MCP tool arguments failed schema validation")
+
+
+class MCPContextFailureError(DevFlowError):
+    """Required MCP context could not be retrieved."""
+
+    code = "MCP_CONTEXT_FAILURE"
+
+    def __init__(self) -> None:
+        super().__init__("Required MCP context unavailable")
+
+
 class MCPTimeoutError(DevFlowError):
     """The MCP request timed out."""
 

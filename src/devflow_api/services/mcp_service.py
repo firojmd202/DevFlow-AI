@@ -17,28 +17,8 @@ from devflow_api.adapters.exceptions import (
 from devflow_api.adapters.mcp_client import MCPClient, MCPToolResult
 from devflow_api.repositories.approval import AuditLogRepository
 from devflow_api.repositories.mcp_approval import MCPApprovalRepository
-
-
-def _validate_json(value: object) -> None:
-    if isinstance(value, dict):
-        for key, item in value.items():
-            if not isinstance(key, str):
-                raise ValueError("MCP argument keys must be strings")
-            _validate_json(item)
-    elif isinstance(value, list):
-        for item in value:
-            _validate_json(item)
-    elif value is not None and type(value) not in (bool, int, float, str):
-        raise ValueError("MCP arguments must contain only JSON values")
-
-
-def _canonical_arguments(arguments: dict[str, object]) -> str:
-    _validate_json(arguments)
-    return json.dumps(arguments, sort_keys=True, separators=(",", ":"), allow_nan=False)
-
-
-def hash_arguments(arguments: dict[str, object]) -> str:
-    return sha256(_canonical_arguments(arguments).encode("utf-8")).hexdigest()
+from devflow_core.mcp_arguments import canonical_arguments
+from devflow_core.mcp_arguments import hash_arguments as hash_arguments
 
 
 class MCPService:
@@ -63,7 +43,7 @@ class MCPService:
     ) -> MCPToolResult:
         config = self._client._configured_tool(server_name, tool_name)
         classification = config.tool_classifications.get(tool_name, "unknown")
-        canonical = _canonical_arguments(arguments)
+        canonical = canonical_arguments(arguments)
         snapshot = cast(dict[str, object], json.loads(canonical))
         arguments_hash = sha256(canonical.encode("utf-8")).hexdigest()
         details: dict[str, object] = {

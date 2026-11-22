@@ -416,7 +416,7 @@ async def test_allowlist_alone_insufficient_for_consequential_tool(mcp_scope: Sc
 
 
 def test_mcp_client_uses_locked_sdk_version() -> None:
-    assert version("mcp").split(".")[0] == "1"
+    assert version("mcp").split(".")[0] == "2"
 
 
 def test_hash_arguments_is_canonical() -> None:

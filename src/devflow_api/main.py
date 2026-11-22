@@ -16,6 +16,7 @@ from devflow_api.adapters.registry import AdapterRegistry, registry
 from devflow_api.database import _configure_sqlite, get_db
 from devflow_api.middleware.error_handler import add_error_handlers
 from devflow_api.middleware.logging import RequestLoggingMiddleware
+from devflow_api.providers.factory import ProviderFactory
 from devflow_api.routers.approvals import router as approvals_router
 from devflow_api.routers.health import router as health_router
 from devflow_api.routers.integrations import router as integrations_router
@@ -34,6 +35,7 @@ from devflow_core.mcp_config import MCPServerConfig
 
 def create_app(settings: Settings | None = None) -> FastAPI:
     config = settings if settings is not None else get_settings()
+    ai_provider = ProviderFactory.create(config)
     configure_logging(config.LOG_LEVEL, config.LOG_FORMAT)
     app_engine = create_async_engine(config.DATABASE_URL, hide_parameters=True)
     event.listen(app_engine.sync_engine, "connect", _configure_sqlite)
@@ -76,6 +78,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     add_error_handlers(app)
     app.add_exception_handler(GitHubOutcomeError, github_outcome_error)
     app.state.settings = config
+    app.state.ai_provider = ai_provider
     app_registry = AdapterRegistry()
     for name in registry.list_names():
         app_registry.register(registry.get(name))

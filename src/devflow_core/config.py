@@ -1,7 +1,7 @@
 """Application settings loaded from the environment and local dotenv file."""
 
 from functools import lru_cache
-from typing import Literal
+from typing import ClassVar, Literal
 
 from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -40,6 +40,16 @@ class Settings(BaseSettings):
     FIGMA_TOKEN: SecretStr | None = None
     OLLAMA_BASE_URL: str = "http://localhost:11434"
     OLLAMA_TIMEOUT_SECONDS: int = Field(default=30, gt=0)
+    AI_PROVIDER: Literal["ollama", "openai"] = "ollama"
+    AI_REQUEST_TIMEOUT_SECONDS: int = Field(default=120, gt=0)
+    AI_MAX_RETRIES: int = Field(default=2, ge=0)
+    AI_RETRY_BUDGET_SECONDS: int = Field(default=30, ge=0)
+    AI_MAX_PROMPT_TOKENS: int = Field(default=8000, gt=0)
+    AI_MAX_OUTPUT_TOKENS: int = Field(default=4000, gt=0)
+    OLLAMA_MODEL: str = "llama3.2"
+    OPENAI_MODEL: str = "gpt-4o-mini"
+    OPENAI_API_KEY: SecretStr | None = None
+    OPENAI_API_BASE_URL: ClassVar[str] = "https://api.openai.com/v1"
     GITHUB_API_BASE_URL: str = "https://api.github.com"
     LOCAL_OPERATOR_ID: str = Field(default="local_operator", min_length=1)
     APPROVAL_TTL_SECONDS: int = Field(default=3600, gt=0)
@@ -52,6 +62,7 @@ class Settings(BaseSettings):
     GITHUB_CONFIRMATION_TTL_SECONDS: int = Field(default=600, gt=0)
     FIGMA_API_BASE_URL: str = "https://api.figma.com"
     MCP_SERVERS_CONFIG: str = ""
+    MCP_STRICT_SCHEMA_VALIDATION: bool = False
 
     @field_validator("MCP_SERVERS_CONFIG")
     @classmethod
