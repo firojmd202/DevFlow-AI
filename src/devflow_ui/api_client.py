@@ -48,8 +48,8 @@ class APIClient:
                     method, f"{self.base_url}/api/v1{path}", params=params, json=payload
                 )
                 response.raise_for_status()
-                if method == "DELETE":
-                    return response.status_code == 204
+                if method == "DELETE" and response.status_code == 204:
+                    return True
                 data = response.json()
                 if data is None:
                     logger.warning("Backend response is null")
@@ -66,6 +66,21 @@ class APIClient:
         except (httpx.HTTPError, httpx.InvalidURL, ValueError):
             logger.warning("Backend request failed")
             return None
+
+    async def specifications(
+        self,
+        path: str = "",
+        *,
+        method: str = "GET",
+        payload: dict[str, object] | None = None,
+        params: dict[str, str | int] | None = None,
+    ) -> object:
+        return await self._request(
+            method,
+            "/specification-requests" + path,
+            payload=payload,
+            params=params,
+        )
 
     async def list_projects(
         self, status: str | None = None, limit: int = 50, offset: int = 0

@@ -12,7 +12,7 @@ class ExecutorRegistry:
         self.register(MockExecutor())
 
     def register(self, executor: Executor) -> None:
-        if executor.identifier.id != "mock":
+        if executor.identifier.id not in {"mock", "spec_generator", "spec_reviewer"}:
             raise ExecutorSelectionError("EXECUTOR_NOT_FOUND")
         self._executors[executor.identifier.id] = executor
 

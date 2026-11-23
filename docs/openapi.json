@@ -1,162 +1,76 @@
 {
   "components": {
     "schemas": {
+      "ApprovalBinding": {
+        "additionalProperties": false,
+        "properties": {
+          "content_digest": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Content Digest",
+            "type": "string"
+          },
+          "version_id": {
+            "exclusiveMinimum": 0.0,
+            "title": "Version Id",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "version_id",
+          "content_digest"
+        ],
+        "title": "ApprovalBinding",
+        "type": "object"
+      },
+      "ApprovalBody": {
+        "additionalProperties": false,
+        "properties": {
+          "approval_id": {
+            "exclusiveMinimum": 0.0,
+            "title": "Approval Id",
+            "type": "integer"
+          },
+          "content_digest": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Content Digest",
+            "type": "string"
+          },
+          "decision": {
+            "$ref": "#/components/schemas/ApprovalDecision"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "maxLength": 1000,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
+          "version_id": {
+            "exclusiveMinimum": 0.0,
+            "title": "Version Id",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "version_id",
+          "content_digest",
+          "approval_id",
+          "decision"
+        ],
+        "title": "ApprovalBody",
+        "type": "object"
+      },
       "ApprovalDecision": {
         "enum": [
           "approved",
           "rejected"
         ],
         "type": "string"
-      },
-      "ApprovalResponse": {
-        "properties": {
-          "action_description": {
-            "title": "Action Description",
-            "type": "string"
-          },
-          "actor_id": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Actor Id"
-          },
-          "authorization_expires_at": {
-            "anyOf": [
-              {
-                "format": "date-time",
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Authorization Expires At"
-          },
-          "consumed_at": {
-            "anyOf": [
-              {
-                "format": "date-time",
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Consumed At"
-          },
-          "expires_at": {
-            "anyOf": [
-              {
-                "format": "date-time",
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Expires At"
-          },
-          "id": {
-            "title": "Id",
-            "type": "integer"
-          },
-          "operation": {
-            "anyOf": [
-              {
-                "enum": [
-                  "specification_approval",
-                  "implementation_authorization",
-                  "pr_creation_approval",
-                  "merge_approval"
-                ],
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Operation"
-          },
-          "parameters_hash": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Parameters Hash"
-          },
-          "requested_at": {
-            "format": "date-time",
-            "title": "Requested At",
-            "type": "string"
-          },
-          "resolved_at": {
-            "anyOf": [
-              {
-                "format": "date-time",
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Resolved At"
-          },
-          "resolved_by": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Resolved By"
-          },
-          "status": {
-            "title": "Status",
-            "type": "string"
-          },
-          "step_name": {
-            "title": "Step Name",
-            "type": "string"
-          },
-          "workflow_run_id": {
-            "title": "Workflow Run Id",
-            "type": "integer"
-          },
-          "workflow_step_run_id": {
-            "anyOf": [
-              {
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Workflow Step Run Id"
-          }
-        },
-        "required": [
-          "id",
-          "workflow_run_id",
-          "step_name",
-          "action_description",
-          "status",
-          "requested_at",
-          "resolved_at",
-          "resolved_by"
-        ],
-        "title": "ApprovalResponse",
-        "type": "object"
       },
       "ApprovalStatus": {
         "enum": [
@@ -196,6 +110,83 @@
           "digest"
         ],
         "title": "ArtifactRef",
+        "type": "object"
+      },
+      "ArtifactResponse": {
+        "properties": {
+          "artifact_type": {
+            "$ref": "#/components/schemas/ArtifactType"
+          },
+          "content": {
+            "title": "Content",
+            "type": "string"
+          },
+          "content_hash": {
+            "title": "Content Hash",
+            "type": "string"
+          }
+        },
+        "required": [
+          "artifact_type",
+          "content",
+          "content_hash"
+        ],
+        "title": "ArtifactResponse",
+        "type": "object"
+      },
+      "ArtifactType": {
+        "enum": [
+          "requirements",
+          "design",
+          "tasks"
+        ],
+        "type": "string"
+      },
+      "AttemptTrigger": {
+        "additionalProperties": false,
+        "properties": {
+          "expected_version": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expected Version"
+          },
+          "model_id": {
+            "anyOf": [
+              {
+                "maxLength": 256,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model Id"
+          },
+          "provider_id": {
+            "anyOf": [
+              {
+                "enum": [
+                  "ollama",
+                  "openai"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Provider Id"
+          }
+        },
+        "title": "AttemptTrigger",
         "type": "object"
       },
       "AuditLogEntry": {
@@ -335,6 +326,18 @@
         "title": "BranchWrite",
         "type": "object"
       },
+      "CancelTaskResponse": {
+        "properties": {
+          "status": {
+            "const": "cancellation_requested",
+            "default": "cancellation_requested",
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "title": "CancelTaskResponse",
+        "type": "object"
+      },
       "CheckRunSummary": {
         "properties": {
           "conclusion": {
@@ -406,6 +409,54 @@
         ],
         "title": "ExecutionMode",
         "type": "string"
+      },
+      "FindingResponse": {
+        "properties": {
+          "acknowledged": {
+            "title": "Acknowledged",
+            "type": "boolean"
+          },
+          "dimension": {
+            "title": "Dimension",
+            "type": "string"
+          },
+          "finding_text": {
+            "title": "Finding Text",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "location": {
+            "title": "Location",
+            "type": "string"
+          },
+          "recommendation": {
+            "title": "Recommendation",
+            "type": "string"
+          },
+          "severity": {
+            "title": "Severity",
+            "type": "string"
+          },
+          "source": {
+            "title": "Source",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "severity",
+          "dimension",
+          "finding_text",
+          "location",
+          "recommendation",
+          "source",
+          "acknowledged"
+        ],
+        "title": "FindingResponse",
+        "type": "object"
       },
       "GitHubConfirmationRequest": {
         "properties": {
@@ -480,6 +531,10 @@
         ],
         "title": "HealthResponse",
         "type": "object"
+      },
+      "InputText": {
+        "maxLength": 4000,
+        "type": "string"
       },
       "IntegrationHealthResponse": {
         "additionalProperties": true,
@@ -805,6 +860,47 @@
         "title": "ProjectUpdate",
         "type": "object"
       },
+      "ProviderAvailability": {
+        "properties": {
+          "available": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Available"
+          },
+          "model_id": {
+            "title": "Model Id",
+            "type": "string"
+          },
+          "provider_id": {
+            "title": "Provider Id",
+            "type": "string"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          }
+        },
+        "required": [
+          "provider_id",
+          "model_id",
+          "available"
+        ],
+        "title": "ProviderAvailability",
+        "type": "object"
+      },
       "PullRequestSummary": {
         "properties": {
           "base_ref": {
@@ -1001,6 +1097,481 @@
         "title": "ResolveApprovalRequest",
         "type": "object"
       },
+      "ReviewFindingsResponse": {
+        "properties": {
+          "disclaimer": {
+            "title": "Disclaimer",
+            "type": "string"
+          },
+          "findings": {
+            "items": {
+              "$ref": "#/components/schemas/FindingResponse"
+            },
+            "title": "Findings",
+            "type": "array"
+          },
+          "summary": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "title": "Summary",
+            "type": "object"
+          }
+        },
+        "required": [
+          "findings",
+          "disclaimer",
+          "summary"
+        ],
+        "title": "ReviewFindingsResponse",
+        "type": "object"
+      },
+      "SpecificationCreateBody": {
+        "additionalProperties": false,
+        "properties": {
+          "acceptance_criteria": {
+            "items": {
+              "$ref": "#/components/schemas/InputText"
+            },
+            "maxItems": 100,
+            "title": "Acceptance Criteria",
+            "type": "array"
+          },
+          "business_goal": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/InputText"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "clarifying_questions": {
+            "items": {
+              "$ref": "#/components/schemas/InputText"
+            },
+            "maxItems": 100,
+            "title": "Clarifying Questions",
+            "type": "array"
+          },
+          "description": {
+            "maxLength": 4000,
+            "minLength": 1,
+            "title": "Description",
+            "type": "string"
+          },
+          "functional_requirements": {
+            "items": {
+              "$ref": "#/components/schemas/InputText"
+            },
+            "maxItems": 100,
+            "title": "Functional Requirements",
+            "type": "array"
+          },
+          "model_id": {
+            "anyOf": [
+              {
+                "maxLength": 256,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model Id"
+          },
+          "nonfunctional_constraints": {
+            "items": {
+              "$ref": "#/components/schemas/InputText"
+            },
+            "maxItems": 100,
+            "title": "Nonfunctional Constraints",
+            "type": "array"
+          },
+          "provider_id": {
+            "default": "ollama",
+            "enum": [
+              "ollama",
+              "openai"
+            ],
+            "title": "Provider Id",
+            "type": "string"
+          },
+          "repo_context": {
+            "anyOf": [
+              {
+                "maxLength": 262144,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Repo Context"
+          },
+          "supersedes_version_id": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Supersedes Version Id"
+          },
+          "title": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Title",
+            "type": "string"
+          },
+          "workflow_run_id": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Workflow Run Id"
+          },
+          "workflow_step_id": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Workflow Step Id"
+          }
+        },
+        "required": [
+          "title",
+          "description"
+        ],
+        "title": "SpecificationCreateBody",
+        "type": "object"
+      },
+      "SpecificationRequestResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "acceptance_criteria": {
+            "items": {
+              "$ref": "#/components/schemas/InputText"
+            },
+            "maxItems": 100,
+            "title": "Acceptance Criteria",
+            "type": "array"
+          },
+          "business_goal": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/InputText"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "clarifying_questions": {
+            "items": {
+              "$ref": "#/components/schemas/InputText"
+            },
+            "maxItems": 100,
+            "title": "Clarifying Questions",
+            "type": "array"
+          },
+          "content_hash": {
+            "title": "Content Hash",
+            "type": "string"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "description": {
+            "maxLength": 4000,
+            "minLength": 1,
+            "title": "Description",
+            "type": "string"
+          },
+          "functional_requirements": {
+            "items": {
+              "$ref": "#/components/schemas/InputText"
+            },
+            "maxItems": 100,
+            "title": "Functional Requirements",
+            "type": "array"
+          },
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "model_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model Id"
+          },
+          "nonfunctional_constraints": {
+            "items": {
+              "$ref": "#/components/schemas/InputText"
+            },
+            "maxItems": 100,
+            "title": "Nonfunctional Constraints",
+            "type": "array"
+          },
+          "provider_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Provider Id"
+          },
+          "repo_context": {
+            "anyOf": [
+              {
+                "maxLength": 262144,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Repo Context"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "title": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Title",
+            "type": "string"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "title": "Updated At",
+            "type": "string"
+          },
+          "version": {
+            "title": "Version",
+            "type": "integer"
+          },
+          "workflow_run_id": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Workflow Run Id"
+          },
+          "workflow_step_id": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Workflow Step Id"
+          }
+        },
+        "required": [
+          "title",
+          "description",
+          "id",
+          "status",
+          "version",
+          "content_hash",
+          "provider_id",
+          "model_id",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "SpecificationRequestResponse",
+        "type": "object"
+      },
+      "SpecificationUpdateBody": {
+        "additionalProperties": false,
+        "properties": {
+          "acceptance_criteria": {
+            "items": {
+              "$ref": "#/components/schemas/InputText"
+            },
+            "maxItems": 100,
+            "title": "Acceptance Criteria",
+            "type": "array"
+          },
+          "business_goal": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/InputText"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "clarifying_questions": {
+            "items": {
+              "$ref": "#/components/schemas/InputText"
+            },
+            "maxItems": 100,
+            "title": "Clarifying Questions",
+            "type": "array"
+          },
+          "description": {
+            "maxLength": 4000,
+            "minLength": 1,
+            "title": "Description",
+            "type": "string"
+          },
+          "expected_version": {
+            "exclusiveMinimum": 0.0,
+            "title": "Expected Version",
+            "type": "integer"
+          },
+          "functional_requirements": {
+            "items": {
+              "$ref": "#/components/schemas/InputText"
+            },
+            "maxItems": 100,
+            "title": "Functional Requirements",
+            "type": "array"
+          },
+          "nonfunctional_constraints": {
+            "items": {
+              "$ref": "#/components/schemas/InputText"
+            },
+            "maxItems": 100,
+            "title": "Nonfunctional Constraints",
+            "type": "array"
+          },
+          "repo_context": {
+            "anyOf": [
+              {
+                "maxLength": 262144,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Repo Context"
+          },
+          "title": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Title",
+            "type": "string"
+          },
+          "workflow_run_id": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Workflow Run Id"
+          },
+          "workflow_step_id": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Workflow Step Id"
+          }
+        },
+        "required": [
+          "title",
+          "description",
+          "expected_version"
+        ],
+        "title": "SpecificationUpdateBody",
+        "type": "object"
+      },
+      "StatusResponse": {
+        "properties": {
+          "completed_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Completed At"
+          },
+          "error_code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error Code"
+          },
+          "error_message": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error Message"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "title": "StatusResponse",
+        "type": "object"
+      },
       "StepRunResponse": {
         "properties": {
           "artifact_refs": {
@@ -1188,6 +1759,29 @@
         "title": "StructuredError",
         "type": "object"
       },
+      "TaskResponse": {
+        "properties": {
+          "poll_url": {
+            "title": "Poll Url",
+            "type": "string"
+          },
+          "status": {
+            "default": "pending",
+            "title": "Status",
+            "type": "string"
+          },
+          "task_id": {
+            "title": "Task Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "task_id",
+          "poll_url"
+        ],
+        "title": "TaskResponse",
+        "type": "object"
+      },
       "ToolSelection": {
         "additionalProperties": false,
         "properties": {
@@ -1266,6 +1860,59 @@
           "type"
         ],
         "title": "ValidationError",
+        "type": "object"
+      },
+      "VersionResponse": {
+        "properties": {
+          "content_digest": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Content Digest"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "supersedes_version_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Supersedes Version Id"
+          },
+          "version_number": {
+            "title": "Version Number",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "version_number",
+          "status",
+          "content_digest",
+          "supersedes_version_id",
+          "created_at"
+        ],
+        "title": "VersionResponse",
         "type": "object"
       },
       "WorkflowCreate": {
@@ -1390,7 +2037,7 @@
         "properties": {
           "approvals": {
             "items": {
-              "$ref": "#/components/schemas/ApprovalResponse"
+              "$ref": "#/components/schemas/devflow_api__schemas__approval__ApprovalResponse"
             },
             "title": "Approvals",
             "type": "array"
@@ -1429,7 +2076,7 @@
           },
           "pending_approvals": {
             "items": {
-              "$ref": "#/components/schemas/ApprovalResponse"
+              "$ref": "#/components/schemas/devflow_api__schemas__approval__ApprovalResponse"
             },
             "title": "Pending Approvals",
             "type": "array"
@@ -1548,6 +2195,191 @@
         },
         "title": "WorkflowUpdate",
         "type": "object"
+      },
+      "devflow_api__schemas__approval__ApprovalResponse": {
+        "properties": {
+          "action_description": {
+            "title": "Action Description",
+            "type": "string"
+          },
+          "actor_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Actor Id"
+          },
+          "authorization_expires_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Authorization Expires At"
+          },
+          "consumed_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Consumed At"
+          },
+          "expires_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expires At"
+          },
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "operation": {
+            "anyOf": [
+              {
+                "enum": [
+                  "specification_approval",
+                  "implementation_authorization",
+                  "pr_creation_approval",
+                  "merge_approval"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Operation"
+          },
+          "parameters_hash": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Parameters Hash"
+          },
+          "requested_at": {
+            "format": "date-time",
+            "title": "Requested At",
+            "type": "string"
+          },
+          "resolved_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Resolved At"
+          },
+          "resolved_by": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Resolved By"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "step_name": {
+            "title": "Step Name",
+            "type": "string"
+          },
+          "workflow_run_id": {
+            "title": "Workflow Run Id",
+            "type": "integer"
+          },
+          "workflow_step_run_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Workflow Step Run Id"
+          }
+        },
+        "required": [
+          "id",
+          "workflow_run_id",
+          "step_name",
+          "action_description",
+          "status",
+          "requested_at",
+          "resolved_at",
+          "resolved_by"
+        ],
+        "title": "ApprovalResponse",
+        "type": "object"
+      },
+      "devflow_api__schemas__specification_http__ApprovalResponse": {
+        "properties": {
+          "expires_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expires At"
+          },
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "version_id": {
+            "title": "Version Id",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "status",
+          "version_id"
+        ],
+        "title": "ApprovalResponse",
+        "type": "object"
       }
     }
   },
@@ -1585,7 +2417,7 @@
               "application/json": {
                 "schema": {
                   "items": {
-                    "$ref": "#/components/schemas/ApprovalResponse"
+                    "$ref": "#/components/schemas/devflow_api__schemas__approval__ApprovalResponse"
                   },
                   "title": "Response List Approvals Api V1 Approvals Get",
                   "type": "array"
@@ -1631,7 +2463,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ApprovalResponse"
+                  "$ref": "#/components/schemas/devflow_api__schemas__approval__ApprovalResponse"
                 }
               }
             },
@@ -1694,7 +2526,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ApprovalResponse"
+                  "$ref": "#/components/schemas/devflow_api__schemas__approval__ApprovalResponse"
                 }
               }
             },
@@ -3337,6 +4169,963 @@
         "summary": "Get Pull Request",
         "tags": [
           "repositories"
+        ]
+      }
+    },
+    "/api/v1/specification-requests": {
+      "get": {
+        "operationId": "list_requests_api_v1_specification_requests_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "exclusiveMinimum": 0,
+              "maximum": 100,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/SpecificationRequestResponse"
+                  },
+                  "title": "Response List Requests Api V1 Specification Requests Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Requests",
+        "tags": [
+          "specification requests"
+        ]
+      },
+      "post": {
+        "operationId": "create_request_api_v1_specification_requests_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SpecificationCreateBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SpecificationRequestResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Create Request",
+        "tags": [
+          "specification requests"
+        ]
+      }
+    },
+    "/api/v1/specification-requests/providers": {
+      "get": {
+        "operationId": "providers_api_v1_specification_requests_providers_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/ProviderAvailability"
+                  },
+                  "title": "Response Providers Api V1 Specification Requests Providers Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Providers",
+        "tags": [
+          "specification requests"
+        ]
+      }
+    },
+    "/api/v1/specification-requests/{id}": {
+      "delete": {
+        "operationId": "cancel_request_api_v1_specification_requests__id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "exclusiveMinimum": 0,
+              "title": "Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Cancel Request",
+        "tags": [
+          "specification requests"
+        ]
+      },
+      "get": {
+        "operationId": "get_request_api_v1_specification_requests__id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "exclusiveMinimum": 0,
+              "title": "Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SpecificationRequestResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Request",
+        "tags": [
+          "specification requests"
+        ]
+      },
+      "patch": {
+        "operationId": "update_request_api_v1_specification_requests__id__patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "exclusiveMinimum": 0,
+              "title": "Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SpecificationUpdateBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SpecificationRequestResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Update Request",
+        "tags": [
+          "specification requests"
+        ]
+      }
+    },
+    "/api/v1/specification-requests/{id}/approval": {
+      "post": {
+        "operationId": "request_approval_api_v1_specification_requests__id__approval_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "exclusiveMinimum": 0,
+              "title": "Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ApprovalBinding"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/devflow_api__schemas__specification_http__ApprovalResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Request Approval",
+        "tags": [
+          "specification requests"
+        ]
+      }
+    },
+    "/api/v1/specification-requests/{id}/approve": {
+      "post": {
+        "operationId": "approve_api_v1_specification_requests__id__approve_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "exclusiveMinimum": 0,
+              "title": "Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ApprovalBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/devflow_api__schemas__specification_http__ApprovalResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Approve",
+        "tags": [
+          "specification requests"
+        ]
+      }
+    },
+    "/api/v1/specification-requests/{id}/audit": {
+      "get": {
+        "operationId": "audit_api_v1_specification_requests__id__audit_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "exclusiveMinimum": 0,
+              "title": "Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "exclusiveMinimum": 0,
+              "maximum": 100,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/AuditLogEntry"
+                  },
+                  "title": "Response Audit Api V1 Specification Requests  Id  Audit Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Audit",
+        "tags": [
+          "specification requests"
+        ]
+      }
+    },
+    "/api/v1/specification-requests/{id}/findings/{finding_id}/acknowledge": {
+      "post": {
+        "operationId": "acknowledge_api_v1_specification_requests__id__findings__finding_id__acknowledge_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "exclusiveMinimum": 0,
+              "title": "Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "path",
+            "name": "finding_id",
+            "required": true,
+            "schema": {
+              "exclusiveMinimum": 0,
+              "title": "Finding Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FindingResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Acknowledge",
+        "tags": [
+          "specification requests"
+        ]
+      }
+    },
+    "/api/v1/specification-requests/{id}/generate": {
+      "delete": {
+        "operationId": "cancel_generation_api_v1_specification_requests__id__generate_delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "exclusiveMinimum": 0,
+              "title": "Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CancelTaskResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Cancel Generation",
+        "tags": [
+          "specification requests"
+        ]
+      },
+      "post": {
+        "operationId": "generate_api_v1_specification_requests__id__generate_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "exclusiveMinimum": 0,
+              "title": "Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/AttemptTrigger"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Body"
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TaskResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Generate",
+        "tags": [
+          "specification requests"
+        ]
+      }
+    },
+    "/api/v1/specification-requests/{id}/review": {
+      "delete": {
+        "operationId": "cancel_review_api_v1_specification_requests__id__review_delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "exclusiveMinimum": 0,
+              "title": "Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CancelTaskResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Cancel Review",
+        "tags": [
+          "specification requests"
+        ]
+      },
+      "post": {
+        "operationId": "review_api_v1_specification_requests__id__review_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "exclusiveMinimum": 0,
+              "title": "Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/AttemptTrigger"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Body"
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TaskResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Review",
+        "tags": [
+          "specification requests"
+        ]
+      }
+    },
+    "/api/v1/specification-requests/{id}/review/findings": {
+      "get": {
+        "operationId": "findings_api_v1_specification_requests__id__review_findings_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "exclusiveMinimum": 0,
+              "title": "Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "version_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "exclusiveMinimum": 0,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Version Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReviewFindingsResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Findings",
+        "tags": [
+          "specification requests"
+        ]
+      }
+    },
+    "/api/v1/specification-requests/{id}/revision": {
+      "post": {
+        "operationId": "request_revision_api_v1_specification_requests__id__revision_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "exclusiveMinimum": 0,
+              "title": "Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VersionResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Request Revision",
+        "tags": [
+          "specification requests"
+        ]
+      }
+    },
+    "/api/v1/specification-requests/{id}/status": {
+      "get": {
+        "operationId": "status_api_v1_specification_requests__id__status_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "exclusiveMinimum": 0,
+              "title": "Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "kind",
+            "required": false,
+            "schema": {
+              "default": "generation",
+              "enum": [
+                "generation",
+                "review"
+              ],
+              "title": "Kind",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StatusResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Status",
+        "tags": [
+          "specification requests"
+        ]
+      }
+    },
+    "/api/v1/specification-requests/{id}/versions": {
+      "get": {
+        "operationId": "versions_api_v1_specification_requests__id__versions_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "exclusiveMinimum": 0,
+              "title": "Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/VersionResponse"
+                  },
+                  "title": "Response Versions Api V1 Specification Requests  Id  Versions Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Versions",
+        "tags": [
+          "specification requests"
+        ]
+      }
+    },
+    "/api/v1/specification-requests/{id}/versions/{version_id}/artifacts/{artifact_type}": {
+      "get": {
+        "operationId": "artifact_api_v1_specification_requests__id__versions__version_id__artifacts__artifact_type__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "exclusiveMinimum": 0,
+              "title": "Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "path",
+            "name": "version_id",
+            "required": true,
+            "schema": {
+              "exclusiveMinimum": 0,
+              "title": "Version Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "path",
+            "name": "artifact_type",
+            "required": true,
+            "schema": {
+              "enum": [
+                "requirements",
+                "design",
+                "tasks"
+              ],
+              "title": "Artifact Type",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ArtifactResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Artifact",
+        "tags": [
+          "specification requests"
         ]
       }
     },

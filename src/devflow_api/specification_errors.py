@@ -11,6 +11,10 @@ class SpecificationNotFoundError(SpecificationError):
     code = "SPEC_NOT_FOUND"
 
 
+class ApprovalBindingMismatch(SpecificationError):
+    code = "APPROVAL_BINDING_MISMATCH"
+
+
 class InvalidSpecTransitionError(SpecificationError):
     code = "INVALID_SPEC_TRANSITION"
 

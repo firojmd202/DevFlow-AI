@@ -227,6 +227,50 @@ class SpecificationVersionRepository:
             request.status = to_status
             return version
 
+    async def approve_verified(
+        self,
+        version_id: int,
+        approval_id: int,
+        actor_id: str,
+        *,
+        bound: bool,
+    ) -> None:
+        async with immediate_transaction(self.session, commit=False):
+            version = await self.get_version(version_id)
+            request = await self.get_request(version.specification_request_id)
+            if (
+                request.current_version != version.version_number
+                or request.status != "ready_for_approval"
+                or version.status != "ready_for_approval"
+                or bound != (request.workflow_run_id is not None)
+            ):
+                raise InvalidSpecTransitionError("Specification is not ready for approval")
+            if not await self.verify_digest(version_id):
+                raise SpecDigestMismatchError("Specification digest changed")
+            now = datetime.now(UTC)
+            values = {
+                "spec_bound_approval_id" if bound else "spec_standalone_approval_id": approval_id,
+                "status": "approved",
+                "approved_at": now,
+                "approved_by": redact_text(actor_id, self.settings),
+                "updated_at": now,
+            }
+            result = cast(
+                CursorResult[object],
+                await self.session.execute(
+                    update(SpecificationVersion)
+                    .where(
+                        SpecificationVersion.id == version_id,
+                        SpecificationVersion.status == "ready_for_approval",
+                    )
+                    .values(**values)
+                ),
+            )
+            if result.rowcount != 1:
+                raise InvalidSpecTransitionError("Specification state changed")
+            request.status = "approved"
+            await self.session.flush()
+
     async def save_artifact(
         self,
         version_id: int,

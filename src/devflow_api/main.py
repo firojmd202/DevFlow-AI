@@ -24,6 +24,7 @@ from devflow_api.routers.learning import router as learning_router
 from devflow_api.routers.projects import router as projects_router
 from devflow_api.routers.repositories import github_outcome_error
 from devflow_api.routers.repositories import router as repositories_router
+from devflow_api.routers.specification_requests import router as specifications_router
 from devflow_api.routers.workflows import router as workflows_router
 from devflow_api.services.recovery import RecoveryService
 from devflow_api.services.repository import GitHubOutcomeError
@@ -97,6 +98,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(workflows_router)
     app.include_router(approvals_router)
     app.include_router(repositories_router)
+    app.include_router(specifications_router)
     return app
 
 

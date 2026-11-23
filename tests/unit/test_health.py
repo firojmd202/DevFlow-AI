@@ -44,6 +44,20 @@ async def test_health_and_openapi(test_client: httpx.AsyncClient) -> None:
         "/api/v1/repositories/{id}/pull-requests",
         "/api/v1/repositories/{id}/pull-requests/{pr_number}",
         "/api/v1/github-confirmations",
+        "/api/v1/specification-requests",
+        "/api/v1/specification-requests/providers",
+        "/api/v1/specification-requests/{id}",
+        "/api/v1/specification-requests/{id}/approval",
+        "/api/v1/specification-requests/{id}/approve",
+        "/api/v1/specification-requests/{id}/audit",
+        "/api/v1/specification-requests/{id}/findings/{finding_id}/acknowledge",
+        "/api/v1/specification-requests/{id}/generate",
+        "/api/v1/specification-requests/{id}/review",
+        "/api/v1/specification-requests/{id}/review/findings",
+        "/api/v1/specification-requests/{id}/revision",
+        "/api/v1/specification-requests/{id}/status",
+        "/api/v1/specification-requests/{id}/versions",
+        "/api/v1/specification-requests/{id}/versions/{version_id}/artifacts/{artifact_type}",
     }
 
 
