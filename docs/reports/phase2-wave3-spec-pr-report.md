@@ -15,7 +15,7 @@
 | Title | `docs: finalize Phase 2 Wave 3 coding-agent integration specification` |
 | Base branch | `develop` |
 | Head branch | `firojmd202:feature/phase2-wave3-coding-agent-integration` |
-| Head SHA | `c652578` |
+| Head SHA | `c7b2d1c` |
 | Spec version | v1.0.3 (frozen) |
 | State | Open — awaiting human merge approval |
 
@@ -41,7 +41,7 @@
 | `2d8997b` | `docs(phase2-wave3): Wave 3 specification v1.0.1 — ChatGPT review corrections` |
 | `87d37fe` | `docs(phase2-wave3): finalize Wave 3 specification v1.0.2 — targeted integration corrections` |
 | `c652578` | `docs(phase2-wave3): add Wave 3 spec PR report — PR #25, all CI checks passed` |
-| `[updated after push]` | `docs(phase2-wave3): resolve final schema and lifecycle contradictions -- spec v1.0.3` |
+| `c7b2d1c` | `docs(phase2-wave3): resolve final schema and lifecycle contradictions -- spec v1.0.3` |
 
 ---
 
