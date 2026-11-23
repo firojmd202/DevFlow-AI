@@ -1,18 +1,19 @@
 # DevFlow AI — Phase 2 Wave 2: AI Specification Generation and Review Design
 
-**Version:** 1.6.0
-**Status:** Final — Approval-contract aligned, PR-ready
+**Version:** 1.6.1
+**Status:** Final — Async HTTP contract and focused test runtime aligned, PR-ready
 **Scope:** Phase 2 Wave 2 — AI Specification Generation and Review
 **Branch:** `feature/phase2-wave2-ai-spec-generation`
 **Base commit:** `b3b37ff` (Wave 1 implementation merged, develop HEAD)
-**Last Updated:** 2026-11-18
-**Companion:** `requirements.md` (v1.6.0), `tasks.md` (v1.6.0).
+**Last Updated:** 2026-11-24
+**Companion:** `requirements.md` (v1.6.1), `tasks.md` (v1.6.1).
 
 **Version history:**
 - v1.0.0–v1.3.0 — See prior version history.
 - v1.4.0 — 2026-11-18 — Implementation-contract alignment: C1–C6.
 - v1.5.0 — 2026-11-18 — Approval integration clarification: A1–A6.
 - v1.6.0 — 2026-11-18 — Final approval-contract alignment: B (REQ-W2.7.3.2 corrected — workflow-bound `consumed_at` set at dispatch time, not at `resolve_bound`; four approval concepts defined in §3.9), C (digest-mismatch in `resolve_bound` fully defined — ApprovalRequest already resolved before digest check; on mismatch spec stays at `"ready_for_approval"`, Wave 1 approval NOT reversed, fresh approval required, failure audited), D (readiness report gate 2 updated to 14 tasks).
+- v1.6.1 — 2026-11-24 — Amendment A (async HTTP contract): §4.3 and §7 updated — HTTP 202 for accepted submissions, HTTP 200 for all poll states, background domain error codes preserved in status response body, synchronous error statuses retained for pre-acceptance failures, cancellation contract and error envelope field names documented. Amendment B (focused test runtime): §7 test reference environment note added with 120-second mandatory limit and 60-second advisory target.
 
 ---
 
@@ -601,11 +602,15 @@ Wave 2 inherits Phase 1's local-operator trust boundary. `actor_id` is always `S
 ```python
 class ErrorResponse(BaseModel):
     code: str
-    message: str
+    error: str          # wire field name is "error", NOT "message" — preserved for client compatibility
     detail: str | None = None  # never contains a stack trace
 ```
 
-HTTP 500 responses use `code = "INTERNAL_ERROR"` and `message = "An internal error occurred."` — no stack trace in the body.
+HTTP 500 responses use `code = "INTERNAL_ERROR"` and `error = "An internal error occurred."` — no stack trace in the body.
+
+**Amendment A6 (v1.6.1) — Error envelope compatibility:**
+- **Synchronous error responses** (returned directly in HTTP 4xx/5xx): `{"error": "<sanitized_message>", "code": "<domain_code>"}`. The field name `error` MUST NOT be renamed to `message`; existing clients read the `error` field.
+- **Asynchronous status responses** (returned in HTTP 200 poll): `{"status": "...", "error_code": "<domain_code>", "error_message": "<text>"}`. The `error_code` and `error_message` fields are null for non-failed states.
 
 ---
 
@@ -753,29 +758,54 @@ Provider calls (Ollama, OpenAI) may take 30–120 seconds for large prompts. HTT
 
 **Trigger endpoints** (`POST /generate`, `POST /review`):
 1. Create `GenerationAttempt` or `ReviewAttempt` row (`status = "pending"`).
-2. Return HTTP 202 with `task_id = str(attempt_id)` and `poll_url`.
+2. Return **HTTP 202** with `task_id = str(attempt_id)` and `poll_url`. The HTTP connection is closed immediately; inference runs in a background task.
 3. Schedule the actual work via `FastAPI BackgroundTasks` (or `asyncio.create_task` for long-running work).
 
 **Background task:**
 1. Update attempt `status = "running"`.
 2. Execute provider call with `asyncio.timeout(AI_REQUEST_TIMEOUT_SECONDS)`.
-3. On completion: update `status = "succeeded"` or `"failed"`.
+3. On completion: update `status = "succeeded"` or `"failed"` with appropriate `error_code`.
 4. Write audit event.
 
-**Poll endpoint** (`GET /{id}/status`):
-- Reads `GenerationAttempt.status` from the database.
-- Returns immediately without blocking.
+**Amendment A1–A3 (v1.6.1) — Poll endpoint contract:**
 
-**Cancellation (F6 — CancellationToken mechanism):**
+**Poll endpoint** (`GET /{id}/status`):
+- Returns **HTTP 200** for ALL attempt states (pending, running, succeeded, failed, cancelled).
+- Response body: `{"status": "...", "error_code": "<code>|null", "error_message": "<text>|null", "completed_at": "<iso8601>|null"}`.
+- A failed attempt is NEVER returned as an HTTP error at the status endpoint. The failure is communicated via `status = "failed"` and `error_code` in the HTTP 200 response body.
+- Asynchronous domain errors (`PROVIDER_UNAVAILABLE`, `PROVIDER_TIMEOUT`, `MALFORMED_OUTPUT`, `MCP_CONTEXT_FAILURE`, `PROVIDER_CANCELLED`, `AI_REVIEW_MALFORMED`) appear as `error_code` values in the HTTP 200 poll response, NOT as HTTP 503/504/422/502 status codes.
+
+**Synchronous pre-acceptance errors** (before HTTP 202 is returned) retain their HTTP error status codes:
+- 400 — `PROVIDER_NOT_CONFIGURED`
+- 409 — `GENERATION_ALREADY_IN_PROGRESS`, `REVIEW_ALREADY_IN_PROGRESS`, `SPEC_APPROVED_NO_OVERWRITE`, `INVALID_SPEC_TRANSITION`
+- 422 — `INVALID_SPECIFICATION_REQUEST`
+No synchronous probe of the AI provider or MCP server is performed before returning HTTP 202.
+
+**Cancellation (Amendment A5, v1.6.1 — CancellationToken mechanism):**
 - Client sends `DELETE /{id}/generate` or `DELETE /{id}/review` (explicit cancellation routes; see §4.1).
 - The route sets `GenerationAttempt.cancellation_requested = True` (or `ReviewAttempt.cancellation_requested = True`) in the database (single `UPDATE` with `BEGIN IMMEDIATE`).
 - The background task checks `cancellation_requested` from the database at the following checkpoints: (a) before starting the AI call, (b) in the `asyncio.timeout` context if the AI call completes quickly, and (c) before persisting artifacts.
 - If the flag is set before the AI call starts, the task exits immediately with `status = "cancelled"`.
 - If the AI call is already in flight, the background task wraps it in `asyncio.wait_for` with a periodic cancellation-check loop; on detecting the flag it cancels the underlying coroutine.
-- Status transitions to `"cancelled"`. SpecificationRequest.status and SpecificationVersion.status are reverted as appropriate (same recovery path as failure).
-- HTTP response from the cancel route: `200 {"status": "cancellation_requested"}` if the attempt was in `"pending"` or `"running"` state; `409 {"code": "TASK_NOT_CANCELLABLE", "message": "..."}` if already terminal.
+- Status transitions to `"cancelled"` with `error_code = "PROVIDER_CANCELLED"`. `SpecificationRequest.status` and `SpecificationVersion.status` are reverted as appropriate (same recovery path as failure).
+- **HTTP response from the cancel route:**
+  - HTTP 200 `{"status": "cancellation_requested"}` if the attempt was in `"pending"` or `"running"` state.
+  - HTTP 409 `{"code": "TASK_NOT_CANCELLABLE", "error": "..."}` if the attempt is absent or in a terminal state.
+- **HTTP response from subsequent status poll:** HTTP 200 with `status = "cancelled"` and `error_code = "PROVIDER_CANCELLED"`.
 
 **Note on FastAPI BackgroundTasks:** `BackgroundTasks` run after the response is sent in the same process; they do not survive process restart. For production resilience, a task queue (e.g., SQLite-backed queue) is recommended but is out of Wave 2 scope. Wave 2 uses `BackgroundTasks` for simplicity, with startup recovery handling tasks interrupted by restart (REQ-W2.9.9).
+
+**Test reference environment (Amendment B, v1.6.1):**
+Wave 2 focused tests MUST pass, run without live external services, use deterministic providers/fixtures, and complete in **under 120 seconds** on the following reference environment:
+- OS: Windows
+- Python: 3.12.10
+- pytest: 9.2.0
+- DB: SQLite in-memory
+- Coverage: `--no-cov` for focused runs (coverage applied in full suite only)
+- Command: `python -m pytest tests/ -k wave2 --no-cov -q --durations=15`
+- Execution mode: sequential
+
+Advisory target: under 60 seconds. This is an optimization target — not a release blocker.
 
 **F-FIN-6 — Wave 2 startup recovery (`SpecificationRecoveryService`):**
 
