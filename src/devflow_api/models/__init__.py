@@ -9,6 +9,7 @@ from devflow_api.models.learning import LearningItem
 from devflow_api.models.mcp_approval import MCPApproval
 from devflow_api.models.project import Project
 from devflow_api.models.repository import RepositoryConfig
+from devflow_api.models.specification import SpecificationRequest
 from devflow_api.models.workflow import Workflow, WorkflowRun
 from devflow_api.models.workflow_step_run import WorkflowStepRun
 
@@ -21,6 +22,7 @@ __all__ = [
     "MCPApproval",
     "Project",
     "RepositoryConfig",
+    "SpecificationRequest",
     "Workflow",
     "WorkflowAuditLog",
     "WorkflowRun",

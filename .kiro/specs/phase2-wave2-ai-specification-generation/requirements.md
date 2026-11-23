@@ -1,16 +1,70 @@
 # DevFlow AI — Phase 2 Wave 2: AI Specification Generation and Review Requirements
 
-**Version:** 1.6.0
-**Status:** Final — Approval-contract aligned, PR-ready
+**Version:** 1.6.1
+**Status:** Final — Async HTTP contract and focused test runtime aligned, PR-ready
 **Scope:** Phase 2 Wave 2 — AI Specification Generation and Review
 **Branch:** `feature/phase2-wave2-ai-spec-generation`
 **Base commit:** `b3b37ff` (Wave 1 implementation merged, develop HEAD)
-**Last Updated:** 2026-11-18
+**Last Updated:** 2026-11-24
 **Supersedes:** None (first Wave 2 specification). Extends `.kiro/specs/phase2-wave1-workflow-execution-engine/` (v2.1.4); does not modify it.
 
 **Version history:**
 - v1.0.0–v1.5.0 — See prior version history.
 - v1.6.0 — 2026-11-18 — Final approval-contract alignment: B (REQ-W2.7.3 corrected — workflow-bound `consumed_at` is set at dispatch time, not at `resolve_bound` time; two-phase model explicit), C (REQ-W2.7.2 digest-mismatch: on mismatch spec stays at `"ready_for_approval"`, Wave 1 approval NOT reversed, failure audited as `spec_approval_digest_mismatch`, fresh approval required; test added), D (requirements count confirmed 54).
+- v1.6.1 — 2026-11-24 — Amendment A (async HTTP contract): REQ-W2.8.2–W2.8.3 updated — HTTP 202 for accepted submissions, HTTP 200 for all poll states, background domain error codes preserved in status response, synchronous error statuses retained for pre-acceptance failures, cancellation contract clarified, error envelope field names locked. Amendment B (focused test runtime): W2.T11.1 mandatory limit raised from 60 s to 120 s; advisory target retained as 60 s; reference environment documented.
+
+---
+
+## Amendment Record
+
+### Version 1.6.1 (2026-11-24) — User-approved amendments
+
+**Previous version:** v1.6.0
+**New version:** v1.6.1
+**Amendment authority:** User-approved via workflow session `wf_09580cc65549f924`.
+
+#### Amendment A — Asynchronous HTTP contract
+
+User-approved changes to REQ-W2.8.2 and REQ-W2.8.3 clarifying that:
+
+1. Successful submission of generation or review returns **HTTP 202 Accepted** plus a durable attempt ID and status polling URL. The HTTP connection is not held open during inference.
+2. Status retrieval returns **HTTP 200** for all attempt states (pending, running, completed, failed, cancelled). The response body exposes the actual state. A failed attempt is never represented as a successful HTTP operation.
+3. Failures discovered after HTTP 202 acceptance are persisted and surfaced through the status poll endpoint. All five background domain error codes (`PROVIDER_UNAVAILABLE`, `PROVIDER_TIMEOUT`, `MALFORMED_OUTPUT`, `MCP_CONTEXT_FAILURE`, `PROVIDER_CANCELLED`) plus the review-specific `AI_REVIEW_MALFORMED` are preserved in the poll response.
+4. Synchronous failures (before acceptance) retain their HTTP error statuses: 400 (validation), 401 (auth), 403 (forbidden), 409 (`GENERATION_ALREADY_IN_PROGRESS`, `REVIEW_ALREADY_IN_PROGRESS`). No synchronous provider probe is added.
+5. Cancellation: accepted → HTTP 200 `status=cancellation_requested`; completed via poll → HTTP 200 `status=cancelled`, `error_code=PROVIDER_CANCELLED`; absent/terminal → HTTP 409 `TASK_NOT_CANCELLABLE`.
+6. Error envelope field names: synchronous errors use `{"error": "<sanitized>", "code": "<domain_code>"}` (the existing wire field `error` is NOT renamed to `message`); async status uses `error_code` + `error_message` in the status response body.
+
+**Affected requirements:** REQ-W2.8.2 (W2.8.2.1–W2.8.2.3), REQ-W2.8.3 (W2.8.3.1–W2.8.3.3, full error table, new sub-requirements W2.8.3.1–W2.8.3.6)
+**Affected design sections:** §4.3, §7
+**Affected acceptance criteria:** W2.T9.2, W2.T9.3, W2.T9.5, W2.T9.9, W2.T9.10, W2.T11.9
+
+#### Amendment B — Focused test runtime
+
+User-approved change to W2.T11.1:
+
+- **Mandatory:** All Wave 2 focused tests MUST pass, run without live external services, use deterministic providers/fixtures, and complete in **under 120 seconds** on the documented reference environment.
+- **Advisory:** Under 60 seconds is an optimization target — not a release blocker.
+- Reference environment documented in W2.T11.1: Windows, Python 3.12, pytest 9.2.0, SQLite in-memory, `--no-cov`, sequential execution.
+
+**Affected requirements:** REQ-W2.9.1 (test coverage mandate), W2.T11.1 acceptance criterion
+**Affected design sections:** §7 (asynchronous processing, test reference environment note)
+**Affected acceptance criteria:** W2.T11.1
+
+#### Unchanged architecture and security invariants
+
+The following are explicitly unchanged by both amendments:
+
+- Architecture layering: Streamlit → APIClient → FastAPI → Domain services → Repositories → SQLite (Design §1, §2)
+- MCP security controls: allowlist, `_authorized` context manager, `read_only` classification, JSON schema validation, argument bounds (REQ-W2.3.1–W2.3.6, W2.T3)
+- Secret redaction: `SecretStr` on all credential fields; no secrets in logs, audit, or DB (REQ-W2.9.2)
+- No arbitrary shell/filesystem access from HTTP input (REQ-W2.9.6)
+- No wildcard MCP tool authorization (REQ-W2.3.3.2)
+- Bounded context retrieval (REQ-W2.4.7)
+- Prompt injection defense: untrusted content in delimited sections (REQ-W2.9.1)
+- Approval atomicity and digest binding (REQ-W2.7.2, W2.7.3)
+- 54 requirements, 14 tasks — counts unchanged
+- 80% branch coverage floor — unchanged
+- All 15 domain error codes preserved
 
 ---
 
@@ -542,43 +596,68 @@ W2.8.1.3 — `mypy --strict` passes for all route handlers.
 
 ### REQ-W2.8.2
 WHEN asynchronous generation or review is in progress,
-THEN the system MUST handle provider calls that exceed HTTP request timeouts using a background-task pattern. The trigger endpoints (`/generate`, `/review`) MUST return HTTP 202 Accepted with a `task_id`; the client polls `/status` to check progress. The background task MUST update `GenerationAttempt.status` or `ReviewAttempt.status` atomically; the status endpoint returns the current status without blocking.
+THEN the system MUST handle provider calls that exceed HTTP request timeouts using a background-task pattern. The trigger endpoints (`/generate`, `/review`) MUST return HTTP 202 Accepted with a durable `task_id` and `poll_url`; the HTTP connection MUST NOT be held open during inference. The client polls `/status` to check progress. The background task MUST update `GenerationAttempt.status` or `ReviewAttempt.status` atomically; the status endpoint MUST return HTTP 200 for ALL attempt states (pending, running, succeeded, failed, cancelled) without blocking. A failed attempt is NEVER represented as a failed HTTP operation at the status endpoint — the state is returned in the response body.
 
 **F6 — Cancellation routes:**
-- `DELETE /api/v1/specification-requests/{id}/generate` — cancel an in-progress or pending generation (returns HTTP 200 `{"status": "cancellation_requested"}` or HTTP 409 `TASK_NOT_CANCELLABLE`).
+- `DELETE /api/v1/specification-requests/{id}/generate` — cancel an in-progress or pending generation: HTTP 200 `{"status": "cancellation_requested"}` when accepted; HTTP 409 `TASK_NOT_CANCELLABLE` when the attempt is absent or in a terminal state.
 - `DELETE /api/v1/specification-requests/{id}/review` — cancel an in-progress or pending review (same response contract).
+- When the background worker settles the cancellation: `GET /status` returns HTTP 200 with `status = "cancelled"` and `error_code = "PROVIDER_CANCELLED"`.
+
+**Amendment A1–A5 (v1.6.1):** This requirement supersedes the v1.6.0 wording on HTTP status codes for asynchronous failures. Errors discovered in background work after HTTP 202 acceptance are persisted as attempt `error_code` values and returned via the HTTP 200 status poll response, NOT as direct HTTP error statuses.
 
 **Acceptance Criteria:**
-W2.8.2.1 — `POST /generate` returns HTTP 202 with `{"task_id": "...", "status": "pending"}`.
-W2.8.2.2 — `GET /status` returns `{"status": "running" | "succeeded" | "failed" | "cancelled"}` without blocking.
-W2.8.2.3 — Cancelling via `DELETE /api/v1/specification-requests/{id}/generate` or `DELETE /api/v1/specification-requests/{id}/review` sets the attempt status to `cancelled` and does not leave orphaned background tasks.
+W2.8.2.1 — `POST /generate` returns HTTP 202 with `{"task_id": "...", "status": "pending", "poll_url": "..."}`. The HTTP connection is not held open during inference.
+W2.8.2.2 — `GET /status` returns HTTP 200 for all attempt states (pending, running, succeeded, failed, cancelled). The response body includes `status`, `error_code` (nullable), and `error_message` (nullable).
+W2.8.2.3 — Cancelling via `DELETE /{id}/generate` or `DELETE /{id}/review` while the attempt is active returns HTTP 200 `{"status": "cancellation_requested"}` and does not leave orphaned background tasks.
+W2.8.2.4 — After cancellation is settled, `GET /status` returns HTTP 200 with `status = "cancelled"` and `error_code = "PROVIDER_CANCELLED"`.
+W2.8.2.5 — `DELETE /{id}/generate` or `DELETE /{id}/review` when the attempt is absent or in a terminal state returns HTTP 409 `{"code": "TASK_NOT_CANCELLABLE", "error": "<message>"}`.
 
 ### REQ-W2.8.3
 WHEN API error states are defined,
-THEN the API MUST return documented error codes for all named failure states:
+THEN the API MUST return documented error codes for all named failure states at the correct lifecycle stage:
+
+**Synchronous errors (returned directly in the HTTP response before acceptance):**
 
 | Error Code | HTTP Status | Trigger |
 |---|---|---|
-| `INVALID_SPECIFICATION_REQUEST` | 422 | Missing required fields |
-| `PROVIDER_UNAVAILABLE` | 503 | AI provider not reachable |
-| `PROVIDER_TIMEOUT` | 504 | AI request timed out |
+| `INVALID_SPECIFICATION_REQUEST` | 422 | Missing or invalid required fields in request body |
 | `PROVIDER_NOT_CONFIGURED` | 400 | OpenAI selected but not configured |
-| `PROVIDER_CANCELLED` | 409 | Request cancelled by client (409 is used when the client explicitly cancels an in-progress task; response body contains `error_code: PROVIDER_CANCELLED`) |
-| `MALFORMED_OUTPUT` | 422 | AI output failed schema validation |
-| `MCP_CONTEXT_FAILURE` | 502 | Critical MCP context retrieval failed |
-| `SPEC_APPROVED_NO_OVERWRITE` | 409 | Attempt to modify approved spec |
-| `SPEC_DIGEST_MISMATCH` | 409 | Digest changed since Generated state |
-| `INVALID_SPEC_TRANSITION` | 409 | Illegal lifecycle state transition |
-| `APPROVAL_EXPIRED` | 409 | Approval TTL elapsed (from Wave 1) |
-| `APPROVAL_ALREADY_RESOLVED` | 409 | Approval already resolved (from Wave 1) |
-| `GENERATION_ALREADY_IN_PROGRESS` | 409 | POST /generate when a generation attempt is already pending or running |
-| `REVIEW_ALREADY_IN_PROGRESS` | 409 | POST /review when a review attempt is already pending or running |
-| `TASK_NOT_CANCELLABLE` | 409 | DELETE /generate or /review when the attempt is in a terminal state |
+| `GENERATION_ALREADY_IN_PROGRESS` | 409 | `POST /generate` when a generation attempt is already pending or running |
+| `REVIEW_ALREADY_IN_PROGRESS` | 409 | `POST /review` when a review attempt is already pending or running |
+| `SPEC_APPROVED_NO_OVERWRITE` | 409 | Attempt to submit generation or review against an approved spec |
+| `INVALID_SPEC_TRANSITION` | 409 | Illegal lifecycle state transition detected before acceptance |
+| `APPROVAL_EXPIRED` | 409 | Approval TTL elapsed (from Wave 1 or standalone approval) |
+| `APPROVAL_ALREADY_RESOLVED` | 409 | Approval already resolved |
+| `SPEC_DIGEST_MISMATCH` | 409 | Digest changed since Generated state (detected synchronously on approval) |
+| `TASK_NOT_CANCELLABLE` | 409 | `DELETE /generate` or `DELETE /review` when the attempt is absent or in a terminal state |
+
+**Asynchronous errors (persisted as attempt `error_code` and returned via HTTP 200 status poll):**
+
+| Error Code | Poll Body Field | Trigger |
+|---|---|---|
+| `PROVIDER_UNAVAILABLE` | `error_code` | AI provider not reachable (discovered in background) |
+| `PROVIDER_TIMEOUT` | `error_code` | AI request timed out (discovered in background) |
+| `PROVIDER_CANCELLED` | `error_code` | Request cancelled by client, settled by background worker |
+| `MALFORMED_OUTPUT` | `error_code` | AI output failed schema validation (discovered in background) |
+| `MCP_CONTEXT_FAILURE` | `error_code` | Critical MCP context retrieval failed (discovered in background) |
+| `AI_REVIEW_MALFORMED` | `error_code` | AI review response could not be parsed (review-specific, discovered in background) |
+
+**REQ-W2.8.3.1 — Synchronous pre-acceptance errors:** Each synchronous error code maps to exactly one HTTP status code as listed above. No synchronous probe of the AI provider is added before returning HTTP 202.
+
+**REQ-W2.8.3.2 — Error envelope compatibility:** Synchronous error responses use `{"error": "<sanitized_message>", "code": "<domain_code>"}`. The field name `error` MUST NOT be renamed to `message` for wire-compatibility with existing clients. Asynchronous status responses use `{"status": "...", "error_code": "<domain_code>", "error_message": "<text>"}`.
+
+**REQ-W2.8.3.3 — Asynchronous error codes in poll response:** All six asynchronous error codes MUST appear in the poll response body when the attempt fails or is cancelled. The HTTP status of the poll response MUST remain 200 regardless of attempt outcome.
+
+**REQ-W2.8.3.4 — No HTTP 4xx/5xx for async failures at status endpoint:** The status endpoint (`GET /{id}/status`) MUST NOT return HTTP 503, 504, 422, or 502 for `PROVIDER_UNAVAILABLE`, `PROVIDER_TIMEOUT`, `MALFORMED_OUTPUT`, or `MCP_CONTEXT_FAILURE` respectively. These codes are domain-layer values in the response body only.
+
+**REQ-W2.8.3.5 — Cancellation contract:** Cancellation acceptance (`DELETE /{id}/generate` or `DELETE /{id}/review`) returns HTTP 200 `{"status": "cancellation_requested"}` for active attempts. The background worker settles to `status = "cancelled"` with `error_code = "PROVIDER_CANCELLED"`, readable via the HTTP 200 status poll.
+
+**REQ-W2.8.3.6 — Full 15-code inventory preserved:** All 15 error codes listed in this requirement (10 synchronous + 5 asynchronous background + `AI_REVIEW_MALFORMED`) MUST be verified by tests. W2.T11.9 asserts each code at the correct lifecycle stage (synchronous HTTP status or asynchronous poll body).
 
 **Acceptance Criteria:**
-W2.8.3.1 — Each error code maps to exactly one HTTP status code.
-W2.8.3.2 — Error responses are Pydantic models with `code: str` and `message: str` fields.
-W2.8.3.3 — Tests confirm each error code is returned in the documented scenario.
+W2.8.3.1 — Each synchronous error code maps to exactly one HTTP status code.
+W2.8.3.2 — Synchronous error responses use `{"error": "...", "code": "..."}` (not `message`). Async status responses use `{"status": "...", "error_code": "...", "error_message": "..."}`.
+W2.8.3.3 — Tests confirm each of the 15 error codes is returned at the correct lifecycle stage (synchronous or async poll body).
 
 ### REQ-W2.8.4
 WHEN the Streamlit UI is designed,

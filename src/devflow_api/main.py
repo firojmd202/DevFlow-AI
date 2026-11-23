@@ -16,6 +16,7 @@ from devflow_api.adapters.registry import AdapterRegistry, registry
 from devflow_api.database import _configure_sqlite, get_db
 from devflow_api.middleware.error_handler import add_error_handlers
 from devflow_api.middleware.logging import RequestLoggingMiddleware
+from devflow_api.providers.factory import ProviderFactory
 from devflow_api.routers.approvals import router as approvals_router
 from devflow_api.routers.health import router as health_router
 from devflow_api.routers.integrations import router as integrations_router
@@ -23,9 +24,11 @@ from devflow_api.routers.learning import router as learning_router
 from devflow_api.routers.projects import router as projects_router
 from devflow_api.routers.repositories import github_outcome_error
 from devflow_api.routers.repositories import router as repositories_router
+from devflow_api.routers.specification_requests import router as specifications_router
 from devflow_api.routers.workflows import router as workflows_router
 from devflow_api.services.recovery import RecoveryService
 from devflow_api.services.repository import GitHubOutcomeError
+from devflow_api.services.specification_recovery import SpecificationRecoveryService
 from devflow_core.config import Settings, get_settings
 from devflow_core.exceptions import ConfigurationError
 from devflow_core.logging import configure_logging
@@ -34,6 +37,7 @@ from devflow_core.mcp_config import MCPServerConfig
 
 def create_app(settings: Settings | None = None) -> FastAPI:
     config = settings if settings is not None else get_settings()
+    ai_provider = ProviderFactory.create(config)
     configure_logging(config.LOG_LEVEL, config.LOG_FORMAT)
     app_engine = create_async_engine(config.DATABASE_URL, hide_parameters=True)
     event.listen(app_engine.sync_engine, "connect", _configure_sqlite)
@@ -43,13 +47,22 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         try:
             async with app_engine.connect() as connection:
-                ready = await connection.run_sync(
-                    lambda sync: inspect(sync).has_table("workflow_step_runs")
-                )
-            if not ready:
+                tables = await connection.run_sync(lambda sync: inspect(sync).get_table_names())
+            if "workflow_step_runs" not in tables:
                 raise ConfigurationError("Apply Alembic migration 008 before starting the API")
+            if not {
+                "specification_requests",
+                "specification_versions",
+                "generation_attempts",
+                "review_attempts",
+                "specification_approval_requests",
+            }.issubset(tables):
+                raise ConfigurationError("Apply Alembic migration 009 before starting the API")
             async with sessions() as session:
                 app.state.recovered_steps = await RecoveryService(session, config).recover()
+                app.state.recovered_specifications = await SpecificationRecoveryService(
+                    session
+                ).recover()
             yield
         finally:
             await app_engine.dispose()
@@ -76,6 +89,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     add_error_handlers(app)
     app.add_exception_handler(GitHubOutcomeError, github_outcome_error)
     app.state.settings = config
+    app.state.ai_provider = ai_provider
     app_registry = AdapterRegistry()
     for name in registry.list_names():
         app_registry.register(registry.get(name))
@@ -94,6 +108,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(workflows_router)
     app.include_router(approvals_router)
     app.include_router(repositories_router)
+    app.include_router(specifications_router)
     return app
 
 

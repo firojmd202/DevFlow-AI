@@ -110,6 +110,11 @@ class WorkflowOrchestrator:
         self._sessions = async_sessionmaker(session.bind, expire_on_commit=False)
         self.registry = registry or ExecutorRegistry()
         self.settings = settings or get_settings()
+        if registry is None:
+            from devflow_api.services.specification_execution import SpecificationExecution
+
+            for executor in SpecificationExecution(self._sessions, self.settings).executors():
+                self.registry.register(executor)
 
     async def _get_run(self, run_id: int) -> WorkflowRun:
         async with self._sessions() as session:

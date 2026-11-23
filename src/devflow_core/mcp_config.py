@@ -21,6 +21,7 @@ class MCPServerConfig(BaseModel):
     enabled: bool = True
     allowed_tools: list[Nonempty] = Field(default_factory=lambda: ["*"])
     tool_classifications: dict[str, ToolClassification] = Field(default_factory=dict)
+    tool_schemas: dict[str, dict[str, object]] = Field(default_factory=dict, repr=False)
 
     @classmethod
     def from_settings(cls, settings: MCPSettings) -> list[MCPServerConfig]:

@@ -18,7 +18,9 @@ from devflow_api.adapters.exceptions import (
     MCPTimeoutError,
     MissingCredentialError,
 )
+from devflow_api.providers.exceptions import ProviderConfigurationError
 from devflow_api.schemas.common import ErrorResponse
+from devflow_api.specification_errors import SpecificationError, SpecificationNotFoundError
 from devflow_core.exceptions import (
     ApprovalAlreadyResolvedError,
     ApprovalExpiredError,
@@ -61,6 +63,7 @@ _DOMAIN_ERRORS: dict[type[Exception], tuple[int, str, str]] = {
     MCPTimeoutError: (504, "MCP request timed out", "MCP_TIMEOUT"),
     MCPApprovalRequiredError: (403, "MCP approval required", "MCP_APPROVAL_REQUIRED"),
     MCPApprovalExpiredError: (403, "MCP approval expired", "MCP_APPROVAL_EXPIRED"),
+    ProviderConfigurationError: (400, "Provider is not configured", "PROVIDER_NOT_CONFIGURED"),
 }
 
 
@@ -90,10 +93,15 @@ async def _http_error(request: Request, exc: Exception) -> Response:
 
 
 async def _validation_error(request: Request, exc: Exception) -> JSONResponse:
+    if request.url.path.startswith("/api/v1/specification-requests"):
+        return _error(422, "Invalid specification request", "INVALID_SPECIFICATION_REQUEST")
     return _error(422, "Validation error", "VALIDATION_ERROR")
 
 
 async def _domain_error(request: Request, exc: Exception) -> JSONResponse:
+    if isinstance(exc, SpecificationError):
+        status = 404 if isinstance(exc, SpecificationNotFoundError) else 409
+        return _error(status, "Specification operation could not be completed", exc.code)
     for error_type in type(exc).__mro__:
         mapping = _DOMAIN_ERRORS.get(error_type)
         if mapping is not None:
@@ -117,4 +125,5 @@ def add_error_handlers(app: FastAPI) -> None:
     app.add_exception_handler(RequestValidationError, _validation_error)
     for error_type in _DOMAIN_ERRORS:
         app.add_exception_handler(error_type, _domain_error)
+    app.add_exception_handler(SpecificationError, _domain_error)
     app.add_exception_handler(Exception, handle_unexpected_error)

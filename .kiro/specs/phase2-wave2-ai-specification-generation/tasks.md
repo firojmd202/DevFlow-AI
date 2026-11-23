@@ -1,16 +1,17 @@
 # DevFlow AI — Phase 2 Wave 2: AI Specification Generation and Review Tasks
 
-**Version:** 1.6.0
-**Status:** Final — Approval-contract aligned, PR-ready
+**Version:** 1.6.1
+**Status:** Final — Async HTTP contract and focused test runtime aligned, PR-ready
 **Scope:** Phase 2 Wave 2 — AI Specification Generation and Review
 **Branch:** `feature/phase2-wave2-ai-spec-generation`
 **Base commit:** `b3b37ff` (Wave 1 implementation merged, develop HEAD)
-**Last Updated:** 2026-11-18
-**Companions:** `requirements.md` (v1.6.0), `design.md` (v1.6.0).
+**Last Updated:** 2026-11-24
+**Companions:** `requirements.md` (v1.6.1), `design.md` (v1.6.1).
 
 **Version history:**
 - v1.0.0–v1.5.0 — See prior version history.
 - v1.6.0 — 2026-11-18 — Final approval-contract alignment: W2.T7.20 added (digest-mismatch in workflow-bound path), W2.T11.15 added (stale/mismatched/expired/replayed approval tests).
+- v1.6.1 — 2026-11-24 — Amendment A (async HTTP contract): W2.T9.2, W2.T9.5, W2.T11.9 updated to reflect HTTP 202 for accepted submissions, HTTP 200 for all poll states, error codes asserted at correct lifecycle stage, error envelope field names locked. Amendment B (focused test runtime): W2.T11.1 mandatory limit raised from 60 s to 120 s; advisory target retained as 60 s; reference environment documented.
 
 ---
 
@@ -259,15 +260,15 @@ Create `src/devflow_api/routers/specification_requests.py` with all fourteen rou
 
 **Acceptance Criteria:**
 W2.T9.1 — `POST /api/v1/specification-requests` with valid body returns HTTP 201 with all required response fields.
-W2.T9.2 — `POST /api/v1/specification-requests/{id}/generate` returns HTTP 202 with `task_id` and `poll_url`.
-W2.T9.3 — `GET /api/v1/specification-requests/{id}/status` returns current status without blocking.
+W2.T9.2 — `POST /api/v1/specification-requests/{id}/generate` returns **HTTP 202** with `task_id`, `poll_url`, and `status = "pending"`. The HTTP connection is not held open during inference.
+W2.T9.3 — `GET /api/v1/specification-requests/{id}/status` returns **HTTP 200** for all attempt states (pending, running, succeeded, failed, cancelled). The response body includes `status`, `error_code` (nullable), and `error_message` (nullable).
 W2.T9.4 — All fourteen routes appear in `/openapi.json` (twelve original + two cancellation routes).
-W2.T9.5 — All error codes from design §4.3 (REQ-W2.8.3) are exercised in route tests.
-W2.T9.6 — An unhandled exception in a handler returns HTTP 500 with `{"code":"INTERNAL_ERROR","message":"An internal error occurred."}` and no stack trace.
+W2.T9.5 — All 15 error codes from REQ-W2.8.3 are covered by at least one test, asserted at the correct lifecycle stage: synchronous codes verified as direct HTTP status codes; asynchronous codes verified as `error_code` values in HTTP 200 poll responses.
+W2.T9.6 — An unhandled exception in a handler returns HTTP 500 with `{"code":"INTERNAL_ERROR","error":"An internal error occurred."}` and no stack trace.
 W2.T9.7 — `actor_id` is NEVER read from request bodies; it always equals `Settings.LOCAL_OPERATOR_ID`.
 W2.T9.8 — `mypy --strict` passes for the router and schema modules.
-W2.T9.9 — **F6:** `DELETE /api/v1/specification-requests/{id}/generate` returns HTTP 200 `{"status": "cancellation_requested"}` when the generation attempt is in `pending` or `running` state; returns HTTP 409 `TASK_NOT_CANCELLABLE` when already terminal.
-W2.T9.10 — **F6:** `DELETE /api/v1/specification-requests/{id}/review` returns HTTP 200 `{"status": "cancellation_requested"}` when the review attempt is in `pending` or `running` state; returns HTTP 409 `TASK_NOT_CANCELLABLE` when already terminal.
+W2.T9.9 — **F6:** `DELETE /api/v1/specification-requests/{id}/generate` returns HTTP 200 `{"status": "cancellation_requested"}` when the generation attempt is in `pending` or `running` state; returns HTTP 409 `{"code": "TASK_NOT_CANCELLABLE", "error": "..."}` when the attempt is absent or in a terminal state.
+W2.T9.10 — **F6:** `DELETE /api/v1/specification-requests/{id}/review` returns HTTP 200 `{"status": "cancellation_requested"}` when the review attempt is in `pending` or `running` state; returns HTTP 409 `{"code": "TASK_NOT_CANCELLABLE", "error": "..."}` when the attempt is absent or in a terminal state.
 
 ---
 
@@ -301,7 +302,18 @@ W2.T10.7 — Streamlit `import` test: all four pages import without error when t
 Author the Wave 2 test suite in `tests/test_wave2_*.py`. All tests MUST run without live Ollama, OpenAI, or MCP servers. Use `pytest` fixtures with mocked providers, `httpx.MockTransport`, and in-memory SQLite. Include: provider unit tests, MCP adapter tests, generation service tests, review service tests, approval service tests, repository tests, router integration tests, security tests (prompt injection, secret redaction, no-OpenAI-egress, AST guards, no-execution), startup recovery test, and concurrency tests. CI pipeline MUST NOT require any external service.
 
 **Acceptance Criteria:**
-W2.T11.1 — All Wave 2 tests run with `pytest tests/ -k wave2` and no live external service; total time < 60 seconds.
+W2.T11.1 — **Amendment B (v1.6.1):** All Wave 2 focused tests MUST pass, run without live external services, use deterministic providers/fixtures, and complete in **under 120 seconds** on the documented reference environment. Advisory target: under 60 seconds (optimization target, not a release blocker).
+
+**Reference environment:**
+- OS: Windows
+- Python: 3.12.10
+- pytest: 9.2.0
+- DB: SQLite in-memory
+- Coverage: `--no-cov` for focused runs (coverage applied in full suite only)
+- Command: `python -m pytest tests/ -k wave2 --no-cov -q --durations=15`
+- Execution mode: sequential
+
+The mandatory gate is 120 seconds. Tests MUST NOT be removed, skipped, or have assertions reduced to meet this limit. The 80% branch coverage floor applies to the full suite run, not focused runs.
 W2.T11.2 — Wave 1 tests are unaffected; `pytest tests/ -k "not wave2"` passes without change.
 W2.T11.3 — AST guard test scans all Wave 2 service and adapter modules; asserts no `subprocess`, `os.system`, `exec`, `eval` calls.
 W2.T11.4 — Secret redaction test: a generation attempt with `OPENAI_API_KEY` set confirms the key value does not appear in any log output or database column.
@@ -309,7 +321,11 @@ W2.T11.5 — No-OpenAI-egress test: `AI_PROVIDER="ollama"` with mocked network c
 W2.T11.6 — Prompt-injection test: injected instruction in `repo_context` does not alter the instruction section of the constructed prompt.
 W2.T11.7 — Startup recovery test: a `GenerationAttempt` left in `"running"` state is recovered to `"failed"` with `error_code="INTERRUPTED"` on simulated restart.
 W2.T11.8 — Concurrent approval test: two simultaneous `resolve(approved)` calls → exactly one succeeds.
-W2.T11.9 — All 15 error codes from REQ-W2.8.3 are covered by at least one test.
+W2.T11.9 — **Amendment A7 (v1.6.1):** All 15 error codes from REQ-W2.8.3 are covered by at least one test, asserted at the **correct lifecycle stage**:
+  - **Synchronous codes** (verified as direct HTTP status codes, not in poll response): `INVALID_SPECIFICATION_REQUEST` (422), `PROVIDER_NOT_CONFIGURED` (400), `GENERATION_ALREADY_IN_PROGRESS` (409), `REVIEW_ALREADY_IN_PROGRESS` (409), `SPEC_APPROVED_NO_OVERWRITE` (409), `INVALID_SPEC_TRANSITION` (409), `APPROVAL_EXPIRED` (409), `APPROVAL_ALREADY_RESOLVED` (409), `SPEC_DIGEST_MISMATCH` (409), `TASK_NOT_CANCELLABLE` (409).
+  - **Asynchronous codes** (verified as `error_code` field in HTTP 200 poll response body, NOT as direct HTTP error statuses): `PROVIDER_UNAVAILABLE`, `PROVIDER_TIMEOUT`, `MALFORMED_OUTPUT`, `MCP_CONTEXT_FAILURE`, `PROVIDER_CANCELLED`.
+  - **Review-specific async code** (verified as `error_code` in HTTP 200 poll response): `AI_REVIEW_MALFORMED`.
+  Full 15-code inventory is preserved; no code is removed or reclassified.
 W2.T11.10 — MCP compatibility test: mocked subprocess verifies `MCPClientAdapter` contract without a live MCP server.
 W2.T11.11 — `mypy --strict src/devflow_api/providers/ src/devflow_api/services/specification*.py src/devflow_api/repositories/specification*.py src/devflow_api/routers/specification*.py` exits with code 0.
 W2.T11.12 — `ruff check src/` exits with code 0 on all new Wave 2 files.

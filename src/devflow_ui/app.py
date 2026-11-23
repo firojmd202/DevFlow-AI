@@ -3,6 +3,7 @@
 import streamlit as st
 
 from devflow_ui.components.sidebar import render_sidebar
+from devflow_ui.components.specifications import specification_pages
 
 
 def main() -> None:
@@ -19,7 +20,7 @@ def main() -> None:
         st.Page("pages/9_Integrations.py", title="Integrations", icon="🔌"),
         st.Page("pages/10_Settings.py", title="Settings", icon="⚙️"),
     ]
-    page = st.navigation(pages)
+    page = st.navigation({"Workspace": pages, "Specification management": specification_pages()})
     render_sidebar()
     page.run()
 

@@ -3,9 +3,12 @@
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from devflow_api.database import get_db
+from devflow_api.models.approval import ApprovalRequest
+from devflow_api.models.specification import SpecificationRequest
 from devflow_api.repositories.approval import ApprovalRepository, AuditLogRepository
 from devflow_api.repositories.workflow import WorkflowRunRepository
 from devflow_api.routers.workflows import ExecutionSettings, ResourceId
@@ -13,6 +16,7 @@ from devflow_api.schemas.approval import ApprovalResponse, ApprovalStatus, Resol
 from devflow_api.schemas.common import ErrorResponse
 from devflow_api.services.approval import ApprovalService
 from devflow_api.services.workflow_projection import public_model
+from devflow_core.exceptions import OperationNotPermitted
 
 router = APIRouter(prefix="/api/v1/approvals", tags=["approvals"])
 type Session = Annotated[AsyncSession, Depends(get_db)]
@@ -44,6 +48,18 @@ async def get_approval(
 async def resolve_approval(
     id: ResourceId, body: ResolveApprovalRequest, session: Session, config: ExecutionSettings
 ) -> ApprovalResponse:
+    existing = await session.get(ApprovalRequest, id)
+    if existing is not None and existing.operation == "specification_approval":
+        specification = await session.scalar(
+            select(SpecificationRequest.id)
+            .where(
+                SpecificationRequest.workflow_run_id == existing.workflow_run_id,
+                SpecificationRequest.workflow_step_id == existing.workflow_step_run_id,
+            )
+            .limit(1)
+        )
+        if specification is not None:
+            raise OperationNotPermitted("Use digest-bound specification approval")
     service = ApprovalService(
         ApprovalRepository(session, config),
         WorkflowRunRepository(session),

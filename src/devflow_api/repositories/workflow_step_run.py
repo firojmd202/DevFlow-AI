@@ -291,6 +291,8 @@ class WorkflowStepRunRepository:
                     concurrency_limit=concurrency_limit,
                     expected_input_digest=expected_input_digest,
                 )
+                if operation == "specification_approval":
+                    await self._verify_specification_dispatch(row, approval_id)
                 approvals = ApprovalRepository(self.session)
                 if not await approvals.consume_atomic(
                     approval_id,
@@ -341,6 +343,37 @@ class WorkflowStepRunRepository:
                     commit=False,
                 )
             raise
+
+    async def _verify_specification_dispatch(
+        self,
+        step: WorkflowStepRun,
+        approval_id: int,
+    ) -> None:
+        from devflow_api.models.specification import SpecificationRequest
+        from devflow_api.repositories.specification_version import SpecificationVersionRepository
+
+        requests = list(
+            await self.session.scalars(
+                select(SpecificationRequest)
+                .where(
+                    SpecificationRequest.workflow_run_id == step.workflow_run_id,
+                    SpecificationRequest.workflow_step_id == step.id,
+                )
+                .limit(2)
+            )
+        )
+        if not requests:
+            # Legacy specification gates did not link a Wave 2 specification.
+            return
+        versions = SpecificationVersionRepository(self.session)
+        version = await versions.current_version(requests[0])
+        if (
+            len(requests) != 1
+            or version.status != "approved"
+            or version.spec_bound_approval_id != approval_id
+            or not await versions.verify_digest(version.id)
+        ):
+            raise ApprovalNotConsumableError("Workflow specification approval is not current")
 
     async def persist_result_cas(
         self,

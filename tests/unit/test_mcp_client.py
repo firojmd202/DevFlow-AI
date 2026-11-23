@@ -121,6 +121,57 @@ async def test_unknown_secret_rejected_before_subprocess(
     fake_spawn[1].assert_not_awaited()
 
 
+async def test_allowed_tool_still_requires_a_grant(
+    mcp_client: MCPClient, fake_spawn: tuple[FakeServer, AsyncMock]
+) -> None:
+    with pytest.raises(MCPPermissionError):
+        await mcp_client.call_tool("configured", "read", {})
+    fake_spawn[1].assert_not_awaited()
+
+
+async def test_mcp_protocol_request_notification_and_response(
+    mcp_client: MCPClient,
+    fake_spawn: tuple[FakeServer, AsyncMock],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    process, _ = fake_spawn
+    process.outcome = "protocol"
+    caplog.set_level("DEBUG")
+    assert (await invoke(mcp_client)).content[0]["text"] == "result"
+    assert process.pong.is_set()
+    assert "notifications/initialized" in process.calls
+    assert "private server log" not in caplog.text
+    assert "private malformed log" not in caplog.text
+    assert process.terminated
+
+
+@pytest.mark.parametrize("outcome", ["error", "input_required", "unexpected", "no_tools"])
+async def test_mcp_rejects_protocol_errors_and_unsupported_results(
+    mcp_client: MCPClient, fake_spawn: tuple[FakeServer, AsyncMock], outcome: str
+) -> None:
+    process, _ = fake_spawn
+    process.outcome = outcome
+    with pytest.raises(MCPConnectionError, match="MCP connection failed") as error:
+        await invoke(mcp_client)
+    assert "private" not in str(error.value)
+    assert process.terminated
+
+
+async def test_mcp_cancellation_cleans_up(
+    mcp_client: MCPClient, fake_spawn: tuple[FakeServer, AsyncMock]
+) -> None:
+    process, _ = fake_spawn
+    process.outcome = "stall"
+    task = asyncio.create_task(invoke(mcp_client))
+    async with asyncio.timeout(2):
+        await process.tool_started.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert process.terminated and process.returncode == 0
+    process.stdin.close.assert_called_once()
+
+
 @pytest.mark.parametrize("outcome", ["success", "invalid"])
 async def test_mcp_subprocess_cleanup_in_finally_block(
     mcp_client: MCPClient, fake_spawn: tuple[FakeServer, AsyncMock], outcome: str

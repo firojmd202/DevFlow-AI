@@ -8,6 +8,8 @@ from devflow_ui.api_client import APIClient
 from tests.conftest import ROOT
 
 UI = ROOT / "src/devflow_ui"
+# The navigation and populated Projects tests exercise cold imports under coverage.
+APPTEST_COVERAGE_TIMEOUT = 15.0
 PAGES = (
     ("Dashboard", "Dashboard overview and recent activity"),
     ("Projects", "Project organization"),
@@ -58,7 +60,7 @@ def test_navigation(monkeypatch: pytest.MonkeyPatch) -> None:
         and node.func.value.id == "st"
     ]
     assert calls.count("navigation") == 1 and calls.count("Page") == 10
-    at = AppTest.from_file(UI / "app.py").run()
+    at = AppTest.from_file(UI / "app.py", default_timeout=APPTEST_COVERAGE_TIMEOUT).run()
     assert not at.exception and at.header[0].value == "Dashboard"
     for index, (heading, _) in enumerate(PAGES, 1):
         at.switch_page(f"pages/{index}_{heading}.py").run()
@@ -146,7 +148,9 @@ def test_projects_page_renders(monkeypatch: pytest.MonkeyPatch, available: bool)
     monkeypatch.setattr(APIClient, "list_projects", AsyncMock(return_value=projects))
     create = AsyncMock(return_value=None)
     monkeypatch.setattr(APIClient, "create_project", create)
-    at = AppTest.from_file(UI / "pages/2_Projects.py").run()
+    at = AppTest.from_file(
+        UI / "pages/2_Projects.py", default_timeout=APPTEST_COVERAGE_TIMEOUT
+    ).run()
     assert not at.exception and at.header[0].value == "Projects"
     if not available:
         assert at.warning[0].value.startswith("Backend unavailable")

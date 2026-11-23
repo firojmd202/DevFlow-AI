@@ -73,7 +73,7 @@ Phase 1 head (verified): `007_add_github_confirmations`. Phase 2 extends the cha
 
 **Wave 1 migration:** `008_add_workflow_execution_engine` (chains from `007`; confirmed in codebase at Wave 2 spec authoring). Creates `workflow_step_runs`; additively extends `approval_requests` (no CHECK-constraint change). Reversible. See `.kiro/specs/phase2-wave1-workflow-execution-engine/design.md` §3.
 
-**Wave 2 migration:** `009_add_ai_specification_generation` (chains from `008`; assigned in Wave 2 spec). Creates `specification_requests`, `specification_versions`, `specification_artifacts`, `generation_attempts`, `review_attempts`, `review_findings` plus twelve indexes. Does NOT alter any Phase 0/1/Wave 1 table. Reversible. See `.kiro/specs/phase2-wave2-ai-specification-generation/design.md` §9.
+**Wave 2 migration:** `009_add_ai_specification_generation` (chains from `008`; assigned in Wave 2 spec). Creates `specification_requests`, `specification_versions`, `specification_artifacts`, `generation_attempts`, `review_attempts`, `review_findings` and `specification_approval_requests`, with the indexes specified in the frozen design. Does NOT alter any Phase 0/1/Wave 1 table. Reversible. See `.kiro/specs/phase2-wave2-ai-specification-generation/design.md` §9.
 
 **Later waves** add migrations only as required (e.g., Kiro/Codex artifact tables, PR/CI tracking). Migration revision numbers are not invented ahead of time; each wave confirms the then-current head.
 
@@ -106,7 +106,7 @@ Phase 1 head (verified): `007_add_github_confirmations`. Phase 2 extends the cha
 **PR target:** `develop`
 **Complexity:** High
 **Branch:** `feature/phase2-wave2-ai-spec-generation`
-**Spec:** `.kiro/specs/phase2-wave2-ai-specification-generation/{requirements,design,tasks}.md` (v1.0.0, Draft — awaiting ChatGPT review)
+**Spec:** `.kiro/specs/phase2-wave2-ai-specification-generation/{requirements,design,tasks}.md` (frozen v1.6.0)
 **Readiness report:** `docs/reports/phase2-wave2-spec-readiness.md`
 **MCP assessment:** `docs/reports/phase2-wave2-mcp-compatibility-assessment.md`
 
@@ -117,12 +117,12 @@ Phase 1 head (verified): `007_add_github_confirmations`. Phase 2 extends the cha
 2. Ollama is the default AI provider; OpenAI is optional and requires explicit configuration (`AI_PROVIDER="openai"` + non-empty `OPENAI_API_KEY`).
 3. OpenAI MUST NEVER be invoked as a silent fallback when Ollama fails.
 4. `MCPClientAdapter` wraps existing `MCPClient`; all `mcp.*` imports confined to `MCPClient`; services use only `MCPClientAdapter`.
-5. MCP target version `mcp>=2.3.0,<3.0`; current declared version `mcp>=1.0,<2.0`; compatibility verdict UNKNOWN pending PR #20 evaluation.
+5. MCP declares `mcp>=2.3.0,<3.0` and locks 2.3.0. The transport validates SDK union messages through Pydantic.
 6. Dependabot PR #20 must be evaluated separately before merging; it is NOT part of this Wave 2 spec branch.
-7. Human approval required before downstream implementation authorization; Wave 1 `ApprovalService` reused (no second approval system).
+7. Human approval is required. Workflow-bound requests reuse Wave 1 `ApprovalService` and protected dispatch. Standalone requests use a separate single-use approval record.
 8. Wave 2 ships no real coding-agent execution (Codex CLI, Kiro automation, autonomous GitHub writes).
 9. Alembic migration 009 assigned to Wave 2 (`009_add_ai_specification_generation`, chains from `008`).
-10. `SpecificationApprovalService` delegates entirely to Wave 1 `ApprovalService`; digest-binding, TTL, single-use invariants reused.
+10. `SpecificationApprovalService` verifies the current version and artifact digest. TTL, actor binding and single-use gates apply to both approval paths.
 
 | Task | Description | Size |
 |---|---|---|
@@ -138,8 +138,10 @@ Phase 1 head (verified): `007_add_github_confirmations`. Phase 2 extends the cha
 | W2.T10 | Streamlit pages (spec request, generation status, review findings, approval) | M |
 | W2.T11 | Test suite (offline/mocked providers; CI offline) | L |
 | W2.T12 | Wave 2 readiness report + final verification | S |
+| W2.T13 | Specification startup recovery | S |
+| W2.T14 | Wave 2 executor registration | M |
 
-**Remaining open items:** MCP SDK compatibility confirmation (pending PR #20 evaluation). All other Wave 2 decisions are locked in the spec files.
+**Implementation evidence:** [Group D report](../reports/phase2-wave2-group-d-implementation-report.md) and [Wave 2 final report](../reports/phase2-wave2-final-implementation-report.md). Dependabot PR #20 is declaration-only and becomes redundant after the tested Wave 2 upgrade lands.
 
 ### Wave 3 — Kiro Guided Handoff and Codex CLI
 **PR target:** `develop`
