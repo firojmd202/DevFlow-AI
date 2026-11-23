@@ -1,7 +1,7 @@
 # DevFlow AI — Phase 2 Wave 3: Kiro Guided Handoff and Codex CLI Integration Requirements
 
-**Version:** 1.0.1
-**Status:** Revised — ChatGPT review findings F01–F10 resolved
+**Version:** 1.0.2
+**Status:** Frozen — v1.0.2 targeted integration corrections applied
 **Scope:** Phase 2 Wave 3 — Kiro Guided Handoff and Codex CLI Integration
 **Branch:** `feature/phase2-wave3-coding-agent-integration`
 **Base commit:** `ee57dc7` (Wave 2 merged, develop HEAD)
@@ -16,6 +16,7 @@
 
 - v1.0.0 — 2026-11-23 — Initial Wave 3 specification.
 - v1.0.1 — 2026-11-23 — Revised following ChatGPT review. F01: manual added as first-class execution mode; blocked redefined as an outcome state. F02: authorization binding corrected against actual Wave 1 source; plan-level idempotency strategy replaced global hash uniqueness constraint. F03: report binding fields extended; empty/partial task result now blocks PASS. F04: WorkspaceValidator algorithm corrected; symlink detection fixed; UNC/device-path policy added; TOCTOU documented. F05: approval ordering corrected; Kiro verification precedes final spec approval. F06: durable wait design clarified; non-running human-wait state defined. F07: report_artifacts ownership fixed for pre-attempt Kiro phase; handoff_artifacts table introduced. F08: non-overridable finding categories defined; override limited to advisory findings. F09: Codex CLI capability claims corrected; abstract contract retained. F10: API endpoint list updated; counts corrected.
+- v1.0.2 — 2026-11-23 — Targeted integration corrections: (C1) execution mode enum reconciled to `manual|mock|real_when_isolated`; `blocked` removed from requested modes everywhere. (C2) immutable execution plan persistence: `baseline_commit`, `deadline_at` added; workflow ownership made non-null; crash-safe first transition specified; auth not consumed when real execution blocked. (C3) durable waiting contract source-verified against actual `StepExecutionResult` (`outcome="indeterminate"`); `WAITING_APPROVAL` step state confirmed; backward-compatible extension specified; wait reason, lease release, idempotent resumption, recovery, and duplicate-consumption prevention all specified. (C4) git metadata path validation added to WorkspaceValidator; bound reads, no config includes, `UNSUPPORTED_REPO_LAYOUT` error code defined. (C5) Kiro approval ordering enforced at `SpecificationApprovalService` backend; stale evidence invalidation rule added. (C6) artifact ownership: prompt lookup by `execution_plan_id` only; `content_hash` required; atomic publication; crash-safe recovery. (C7) version bumped to v1.0.2; counts updated.
 
 ---
 
@@ -237,6 +238,25 @@ REQ-W3.2.8.1 — Cancelling `handoff_created` or `awaiting_report` transitions t
 REQ-W3.2.8.2 — Cancelling a `report_validated` handoff transitions to `cancelled`; findings are preserved.
 REQ-W3.2.8.3 — Cancelling a terminal handoff (`report_validated`, `failed`, `expired`, `cancelled`, `correction_requested`) returns HTTP 409 `HANDOFF_NOT_CANCELLABLE`.
 
+### REQ-W3.2.9 — Backend Kiro Verification Prerequisite for Specification Approval
+WHEN a final specification approval is requested for a Wave 3 workflow-linked specification version,
+THEN the `SpecificationApprovalService` backend MUST reject the approval request if: (a) no completed `kiro_handoffs` row exists with `status = 'report_validated'` whose `spec_version_digest` matches the current `SpecificationVersion.content_digest`, or (b) the handoff's `workflow_run_id` does not match the current workflow run. This check is enforced server-side regardless of UI state. The error code is `KIRO_VERIFICATION_REQUIRED`.
+
+**Acceptance Criteria:**
+REQ-W3.2.9.1 — A specification approval request with no linked validated Kiro handoff is rejected with `KIRO_VERIFICATION_REQUIRED`.
+REQ-W3.2.9.2 — A specification approval request where the validated handoff's `spec_version_digest` does not match `SpecificationVersion.content_digest` is rejected with `KIRO_VERIFICATION_REQUIRED`.
+REQ-W3.2.9.3 — The check is performed in `SpecificationApprovalService` before creating or resolving any approval record; it is not enforced only in the UI.
+REQ-W3.2.9.4 — Legacy Wave 2 specification approvals (not linked to a Wave 3 workflow) are unaffected by this rule; the check applies only when the specification is associated with a Wave 3 workflow run.
+
+### REQ-W3.2.10 — Stale Kiro Evidence Invalidation on Specification Revision
+WHEN a specification version is revised (a new version row is created for the same specification request),
+THEN the new version row MUST be created with `kiro_verification_id = NULL`, invalidating any Kiro evidence bound to the prior version. A validated Kiro handoff for version N is not valid evidence for version N+1 even if the content is similar.
+
+**Acceptance Criteria:**
+REQ-W3.2.10.1 — Creating a new specification version sets `kiro_verification_id = NULL` on the new row.
+REQ-W3.2.10.2 — Attempting to approve version N+1 using Kiro evidence bound to version N returns `KIRO_VERIFICATION_REQUIRED`.
+REQ-W3.2.10.3 — The invalidation applies only to the new version; the prior version's records are preserved as historical evidence.
+
 ---
 
 ## Area W3.3 — Codex CLI Integration Contract
@@ -247,7 +267,9 @@ REQ-W3.2.8.3 — Cancelling a terminal handoff (`report_validated`, `failed`, `e
 
 ### REQ-W3.3.1 — Typed Execution Input
 WHEN a Codex execution is requested,
-THEN the system MUST validate a typed `CodexExecutionInput` before accepting. The input MUST contain: `specification_request_id`, `specification_version_id`, `artifact_digest`, `task_ids` (non-empty list; no wildcard `*`), `repo_identity`, `workspace_identity`, `execution_mode` (`mock` or `real_when_isolated`), `deadline_at` (UTC datetime in the future). The `canonical_execution_input_hash` MUST be computed server-side from persisted plan data, never trusted from client input.
+THEN the system MUST validate a typed `CodexExecutionInput` before accepting. The input MUST contain: `specification_request_id`, `specification_version_id`, `artifact_digest`, `task_ids` (non-empty list; no wildcard `*`), `repo_identity`, `workspace_identity`, `execution_mode` (`manual | mock | real_when_isolated`), `deadline_at` (UTC datetime in the future). The `canonical_execution_input_hash` MUST be computed server-side from persisted plan data, never trusted from client input.
+
+> **Note on execution mode vs. execution outcome:** The requested execution mode is one of `manual`, `mock`, or `real_when_isolated`. These are the three values accepted as input. The outcome `real_execution_blocked` arises when `real_when_isolated` is requested but isolation prerequisites are unmet at execution time. It is an **outcome state**, not a valid requested mode. `blocked` is never accepted as an execution mode in any input field.
 
 **Acceptance Criteria:**
 REQ-W3.3.1.1 — Missing any required field returns HTTP 422.
@@ -255,6 +277,7 @@ REQ-W3.3.1.2 — An empty `task_ids` list returns HTTP 422.
 REQ-W3.3.1.3 — `task_ids` containing `"*"` returns HTTP 422 `WILDCARD_TASK_ID_REJECTED`.
 REQ-W3.3.1.4 — `deadline_at` in the past returns HTTP 422.
 REQ-W3.3.1.5 — A client-supplied `canonical_execution_input_hash` is ignored; the server always recomputes it from persisted plan data.
+REQ-W3.3.1.6 — Submitting `execution_mode = "blocked"` or any value outside `manual|mock|real_when_isolated` returns HTTP 422.
 
 ### REQ-W3.3.2 — Mock Execution Mode
 WHEN execution mode is `mock`,
@@ -358,6 +381,17 @@ REQ-W3.4.6.1 — Failing any of the 10 conditions prevents execution.
 REQ-W3.4.6.2 — An authorization for a different workflow run (approval from run A, dispatch in run B) is rejected.
 REQ-W3.4.6.3 — All 10 conditions are checked before `consumed_at` is set.
 
+### REQ-W3.4.7 — Durable Persistence of All Authorization Inputs
+WHEN an execution plan is created before implementation authorization is requested,
+THEN the complete immutable execution plan — including `baseline_commit`, `deadline_at`, and `canonical_input_hash` — MUST be persisted in a single atomic transaction before `implementation_authorization` is requested. Authorization input reconstruction from mutable client data is prohibited; all binding fields are read from the persisted execution plan row.
+
+**Acceptance Criteria:**
+REQ-W3.4.7.1 — `baseline_commit` and `deadline_at` are persisted in `execution_plans` before authorization is requested.
+REQ-W3.4.7.2 — Every authorized execution plan is linked to a workflow run and step (`workflow_run_id NOT NULL`, `workflow_step_run_id NOT NULL`). Standalone (non-workflow) execution plans are not supported in Wave 3.
+REQ-W3.4.7.3 — The first manual prompt export, authorization consumption, durable prompt publication, and execution-attempt state transition are crash-safe: a single `BEGIN IMMEDIATE` transaction spans the plan status update and attempt creation.
+REQ-W3.4.7.4 — Authorization MUST NOT be consumed for `real_when_isolated` mode when isolation prerequisites are unmet at execution time.
+REQ-W3.4.7.5 — Replacement plans (after input changes) require creating a new `execution_plans` row and requesting fresh authorization. The old plan's authorization is not transferable.
+
 ---
 
 ## Area W3.5 — Workspace and Artifact Management
@@ -402,6 +436,20 @@ REQ-W3.5.4.1 — A workspace without `.git` returns `NOT_A_GIT_REPOSITORY`.
 REQ-W3.5.4.2 — A workspace whose git remote does not match `repo_identity` returns `REPOSITORY_IDENTITY_MISMATCH`.
 REQ-W3.5.4.3 — The baseline commit SHA is recorded in the execution attempt.
 REQ-W3.5.4.4 — Git config parsing does not spawn a full shell.
+
+### REQ-W3.5.6 — Git Metadata Path Validation
+WHEN the `WorkspaceValidator` reads any git metadata file or directory (`.git` dir, `.git` indirection file, `gitdir:` target, `commondir` reference, `config`, `HEAD`, ref files, `packed-refs`),
+THEN every resolved path MUST be validated against the approved workspace root before being read. The validator MUST reject: (a) paths outside approved workspace roots, (b) symbolic links in git metadata paths (consistent with the workspace symlink policy in REQ-W3.5.2), (c) Windows junctions and reparse points.
+
+**Acceptance Criteria:**
+REQ-W3.5.6.1 — A `gitdir:` target that resolves outside the approved workspace root returns `UNSUPPORTED_REPO_LAYOUT`.
+REQ-W3.5.6.2 — `.git` as a file is supported only if the `gitdir:` target resolves within an approved workspace root; otherwise returns `UNSUPPORTED_REPO_LAYOUT`.
+REQ-W3.5.6.3 — Git metadata file reads are bounded: `HEAD`, `gitdir`, `commondir` ≤ 4 KB; `config` ≤ 64 KB; `packed-refs` ≤ 1 MB. Exceeding these limits returns `GIT_METADATA_TOO_LARGE`.
+REQ-W3.5.6.4 — Git `config` files containing `include` or `includeIf` directives are rejected (returns `GIT_CONFIG_INCLUDES_UNSUPPORTED`). Config includes are not followed.
+REQ-W3.5.6.5 — Repositories with an `objects/info/alternates` file are rejected (returns `GIT_ALTERNATES_UNSUPPORTED`). External object alternates are not followed.
+REQ-W3.5.6.6 — Repositories containing a `.gitmodules` file at the root return `UNSUPPORTED_REPO_LAYOUT`. Submodule validation is deferred.
+REQ-W3.5.6.7 — The standard repository layout requires `.git` to be a directory (not a file) for non-worktree repos. Standard layout validated before metadata reads proceed.
+REQ-W3.5.6.8 — TOCTOU limitation documented: validation and read are not atomic. Mitigation is defense-in-depth (sandboxed process boundary at Wave 6, operator-controlled workspace roots).
 
 ### REQ-W3.5.5 — Artifact Size Limits and Hashes
 WHEN implementation artifacts are stored,
@@ -505,6 +553,9 @@ THEN no active executor coroutine, task, or lease MUST be held. The durable wait
 REQ-W3.7.3.1 — After transitioning to `awaiting_report`, no background task holds a reference to the handoff coroutine.
 REQ-W3.7.3.2 — After an application restart, `awaiting_report` handoffs are still processable (report can be submitted, expiry checked).
 REQ-W3.7.3.3 — `awaiting_impl_report` execution attempts survive restart and accept report import.
+REQ-W3.7.3.4 — The wait reason is stored as a discriminated field distinguishing `waiting_for_kiro_report` from `waiting_for_impl_authorization`; the two states cannot be confused by the resumption logic.
+REQ-W3.7.3.5 — Resumption after restart re-reads attempt status from the database; already-resumed attempts are not re-dispatched.
+REQ-W3.7.3.6 — `real_when_isolated` NEVER auto-dispatches even after isolation prerequisites might theoretically become available; the user must explicitly request a new attempt.
 
 ### REQ-W3.7.4 — Recovery on Restart
 WHEN the application starts,

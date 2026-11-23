@@ -1,12 +1,20 @@
 # DevFlow AI — Phase 2 Wave 3: Kiro Guided Handoff and Codex CLI Integration Tasks
 
-**Version:** 1.0.1
-**Status:** Revised — ChatGPT review findings F01–F10 resolved
+**Version:** 1.0.2
+**Status:** Frozen — v1.0.2 targeted integration corrections applied
 **Scope:** Phase 2 Wave 3 — Kiro Guided Handoff and Codex CLI Integration
 **Branch:** `feature/phase2-wave3-coding-agent-integration`
 **Base commit:** `ee57dc7` (Wave 2 merged, develop HEAD)
 **Last Updated:** 2026-11-23
-**Companions:** `requirements.md` (v1.0.1), `design.md` (v1.0.1).
+**Companions:** `requirements.md` (v1.0.2), `design.md` (v1.0.2).
+
+---
+
+## Version History
+
+- v1.0.0 — 2026-11-23 — Initial Wave 3 tasks.
+- v1.0.1 — 2026-11-23 — ChatGPT review corrections F01–F10 applied.
+- v1.0.2 — 2026-11-23 — Targeted integration corrections: execution mode enum updated to `manual|mock|real_when_isolated` in all acceptance criteria; `execution_plans` table AC updated for `baseline_commit`, `deadline_at`, NOT NULL FKs; durable waiting contract AC updated citing `outcome="indeterminate"`; git metadata path validation AC added; Kiro approval ordering AC added; artifact ownership AC updated for `execution_plan_id` and `content_hash`.
 
 ---
 
@@ -97,8 +105,14 @@ W3.T1.7 — Rejects UNC path on Windows.
 W3.T1.8 — Uses `is_relative_to()` for containment, not string prefix matching.
 W3.T1.9 — `verify_git_identity()` reads `.git/config` without spawning a subprocess.
 W3.T1.10 — All new `Settings` fields pass `mypy --strict`.
+W3.T1.11 — Git metadata paths (gitdir target, config, HEAD) are validated against the approved workspace root before reading (design §6.3).
+W3.T1.12 — `config` file containing `[include]` or `[includeIf]` returns `GIT_CONFIG_INCLUDES_UNSUPPORTED`.
+W3.T1.13 — `objects/info/alternates` present returns `GIT_ALTERNATES_UNSUPPORTED`.
+W3.T1.14 — `.gitmodules` present at workspace root returns `UNSUPPORTED_REPO_LAYOUT`.
+W3.T1.15 — `HEAD` file exceeding 4 KB returns `GIT_METADATA_TOO_LARGE`.
+W3.T1.16 — `gitdir:` target resolving outside approved workspace root returns `UNSUPPORTED_REPO_LAYOUT`.
 
-**Definition of Done:** All 10 AC pass. `mypy --strict` passes. No production source outside named files altered.
+**Definition of Done:** All 16 AC pass. `mypy --strict` passes. No production source outside named files altered.
 
 **Estimated Complexity:** Medium
 
@@ -188,8 +202,11 @@ W3.T4.7 — Client-supplied `canonical_execution_input_hash` is ignored; server 
 W3.T4.8 — Canonical hash is deterministic; changing any input field changes hash.
 W3.T4.9 — Wildcard `"*"` in `task_ids` returns HTTP 422.
 W3.T4.10 — `mypy --strict` passes.
+W3.T4.11 — `execution_mode = "blocked"` or any value outside `manual|mock|real_when_isolated` returns HTTP 422.
+W3.T4.12 — `KiroHandoffExecutor.execute()` returns `outcome="indeterminate"` with `error.code="WAITING_FOR_KIRO_REPORT"` when entering `awaiting_report` state (source-verified against actual `StepExecutionResult` schema).
+W3.T4.13 — Authorization is NOT consumed when `real_when_isolated` is blocked by `IsolationGate`.
 
-**Definition of Done:** All 10 AC pass. `CodexCLIExecutor` registered as `"codex_cli"`. No real subprocess ever launched in Wave 3.
+**Definition of Done:** All 13 AC pass. `CodexCLIExecutor` registered as `"codex_cli"`. No real subprocess ever launched in Wave 3.
 
 **Estimated Complexity:** Large
 
@@ -246,8 +263,13 @@ W3.T6.5 — No existing Phase 0/1/Wave 1/Wave 2 table is altered.
 W3.T6.6 — `execution_plans` has `UNIQUE(workflow_run_id, workflow_step_run_id)`, not global hash uniqueness.
 W3.T6.7 — `handoff_findings` has `UNIQUE(handoff_record_id, finding_id)`.
 W3.T6.8 — `mypy --strict` passes for `models/coding_agent.py`.
+W3.T6.9 — `execution_plans.workflow_run_id` and `workflow_step_run_id` are `NOT NULL` (standalone plans not supported in Wave 3).
+W3.T6.10 — `execution_plans` contains `baseline_commit TEXT NOT NULL` and `deadline_at TEXT` columns.
+W3.T6.11 — `execution_plans.execution_mode` CHECK constraint is `IN ('manual','mock','real_when_isolated')` — no `'blocked'` value.
+W3.T6.12 — `handoff_artifacts.execution_plan_id` FK column present (NULL for kiro_prompt/kiro_report; NOT NULL for codex_prompt artifacts enforced at service layer).
+W3.T6.13 — `handoff_artifacts.content_hash TEXT NOT NULL` present.
 
-**Definition of Done:** All 8 AC pass. Migration 010 is new Alembic head.
+**Definition of Done:** All 13 AC pass. Migration 010 is new Alembic head.
 
 **Estimated Complexity:** Medium
 
@@ -277,8 +299,12 @@ W3.T7.7 — Second consumption attempt returns `AUTHORIZATION_ALREADY_CONSUMED`.
 W3.T7.8 — Expired authorization fails `consume_atomic` → `AUTHORIZATION_EXPIRED`.
 W3.T7.9 — Authorization from a different workflow run is rejected.
 W3.T7.10 — `mypy --strict` passes for both service files.
+W3.T7.11 — `execution_plans` rows are created with `workflow_run_id NOT NULL` and `workflow_step_run_id NOT NULL`; creating a plan without workflow context returns a service error.
+W3.T7.12 — `baseline_commit` and `deadline_at` are persisted in `execution_plans` before `request_bound_approval` is called.
+W3.T7.13 — Specification approval for a Wave 3 workflow-linked spec without a validated Kiro handoff matching the current content digest is rejected with `KIRO_VERIFICATION_REQUIRED`.
+W3.T7.14 — Prompt artifact lookup uses `execution_plan_id` FK; a lookup by `handoff_id` alone without plan ID is rejected at service layer.
 
-**Definition of Done:** All 10 AC pass. No new approval table introduced; Wave 1 `ApprovalService` only.
+**Definition of Done:** All 14 AC pass. No new approval table introduced; Wave 1 `ApprovalService` only.
 
 **Estimated Complexity:** Medium
 

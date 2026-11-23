@@ -1,18 +1,28 @@
 # DevFlow AI — Phase 2 Wave 3: Kiro Guided Handoff and Codex CLI Integration Design
 
-**Version:** 1.0.1
-**Status:** Revised — ChatGPT review findings F01–F10 resolved
+**Version:** 1.0.2
+**Status:** Frozen — v1.0.2 targeted integration corrections applied
 **Scope:** Phase 2 Wave 3 — Kiro Guided Handoff and Codex CLI Integration
 **Branch:** `feature/phase2-wave3-coding-agent-integration`
 **Base commit:** `ee57dc7` (Wave 2 merged, develop HEAD)
 **Last Updated:** 2026-11-23
-**Companion:** `requirements.md` (v1.0.1), `tasks.md` (v1.0.1).
+**Companion:** `requirements.md` (v1.0.2), `tasks.md` (v1.0.2).
 
 ---
 
 ## 1. Design Principles
 
 Wave 3 extends Wave 1 and Wave 2 additively. All existing contracts are preserved.
+
+---
+
+## Version History
+
+- v1.0.0 — 2026-11-23 — Initial Wave 3 design.
+- v1.0.1 — 2026-11-23 — ChatGPT review corrections F01–F10 applied.
+- v1.0.2 — 2026-11-23 — Targeted integration corrections: (C1) execution mode enum reconciled `manual|mock|real_when_isolated`; `blocked` removed from all typed contracts and DB constraints. (C2) immutable plan persistence: `baseline_commit` and `deadline_at` added to `execution_plans`; workflow FKs made NOT NULL; crash-safe first transition documented. (C3) durable waiting contract source-verified against actual `StepExecutionResult` (`outcome="indeterminate"`); `WAITING_APPROVAL` confirmed; full durable-wait specification added to §3.2.1. (C4) git metadata path validation subsection §6.3 added with boundary checks, bound reads, no config includes, no alternates, `UNSUPPORTED_REPO_LAYOUT` for submodules/worktrees. (C5) Kiro approval ordering enforcement at `SpecificationApprovalService` §8.5 added. (C6) artifact ownership: `execution_plan_id` FK added to `handoff_artifacts`; content immutability, atomic publication, crash-safe recovery documented. (C7) version bumped to v1.0.2.
+
+---
 
 ```
 Streamlit UI → APIClient (httpx) → FastAPI routers → Domain services → Repositories → SQLite
@@ -117,9 +127,62 @@ The `awaiting_report` state is a **non-running human-wait state**. When a handof
 - No background task is active.
 - The durable state is recorded only in `handoff_records.status` and `awaiting_since`.
 
-Resumption occurs on the next user action (report submission or cancellation), which is handled as a fresh HTTP request that reads the persisted handoff state. This is compatible with the Wave 1 engine: the `KiroHandoffExecutor.execute()` returns a `StepExecutionResult` with `outcome = "paused"` (or an equivalent non-terminal marker) when it enters the await state, and the orchestrator treats this as a signal to hold the step in `WAITING_APPROVAL` without consuming the lease actively.
+Resumption occurs on the next user action (report submission or cancellation), which is handled as a fresh HTTP request that reads the persisted handoff state.
 
-**Extension to Wave 1 step lifecycle:** The `KiroHandoffExecutor` uses the `WAITING_APPROVAL` step state (which already exists in Wave 1) as the durable wait state. This is the minimal backward-compatible extension: no new step states are added. The handoff record captures the sub-state within that wait period.
+### 3.2.1 Durable Waiting Contract (Source-Verified)
+
+**Source verification of `StepExecutionResult`:** The actual `StepExecutionResult` schema (from `src/devflow_api/schemas/executor.py`) defines:
+
+```python
+class StepExecutionResult(ExecutorModel):
+    outcome: Literal["succeeded", "failed", "cancelled", "indeterminate"]
+    ...
+```
+
+**`outcome="paused"` does NOT exist** in the actual Wave 1 contract. The design proposed this value in v1.0.0–v1.0.1, which was incorrect. The backward-compatible extension for durable human-wait states is:
+
+- `KiroHandoffExecutor.execute()` returns `outcome="indeterminate"` (the existing marker for "outcome not yet determined; not a final failure") when it enters a human-wait state. The `error.code` is set to `WAITING_FOR_HUMAN_INPUT` with `retryable=False` (indeterminate outcomes cannot be retryable per the validator) and `category="internal"`.
+- The `WAITING_APPROVAL` step state already exists in Wave 1 (`WorkflowStepRun.status`). The orchestrator maps `indeterminate` from a human-wait executor to `WAITING_APPROVAL` using the `error.code` discriminator.
+- No new `StepExecutionResult.outcome` variant is added. No new `WorkflowStepRun` status is added.
+
+**Wait reason discrimination:**
+- `error.code = "WAITING_FOR_KIRO_REPORT"` — handoff in `awaiting_report` state.
+- `error.code = "WAITING_FOR_IMPL_AUTHORIZATION"` — execution attempt in `awaiting_impl_authorization` state.
+
+These two wait states are always distinguishable by reading `handoff_records.status` and `execution_attempts.status`; no logic can confuse them.
+
+**Ownership:** The wait token is owned by the `handoff_records` row (for Kiro waits) or the `execution_attempts` row (for impl-auth waits). The `WorkflowStepRun` holds only the step-level `WAITING_APPROVAL` state; the sub-state detail is in the domain record.
+
+**Atomic transition into wait state:**
+- Entry into `WAITING_APPROVAL` via `request_bound_approval(run_id, step_run_id)` is atomic: transitions step `READY → WAITING_APPROVAL` within a `BEGIN IMMEDIATE` transaction (confirmed from `ApprovalService.request_bound_approval` source: `steps.transition_cas(step_run_id, "WAITING_APPROVAL", from_status="READY")`).
+
+**Lease release:**
+- The orchestrator MUST release the step lease before the step enters `WAITING_APPROVAL`. The `KiroHandoffExecutor.execute()` method returns before the user-wait begins; it does not hold an active coroutine.
+
+**Validated report submission:**
+- Report submission atomically transitions the attempt from `awaiting_report → report_submitted` using `BEGIN IMMEDIATE` CAS. Duplicate submissions (attempt already in `report_submitted`) are rejected with `HANDOFF_NOT_AWAITING_REPORT`.
+
+**Idempotent resumption:**
+- Resumption after restart re-reads attempt status from the database. An already-resumed attempt (status ≠ `awaiting_report` or `awaiting_impl_report`) is not re-dispatched. The recovery service leaves durable wait states untouched.
+
+**Cancellation and expiry:**
+- `awaiting_report` → `expired` via TTL check in `CodingAgentRecoveryService` (emits audit event).
+- `awaiting_report` → `cancelled` via explicit user action (emits audit event).
+- `awaiting_impl_report` → `cancelled` via explicit user action; authorization record reflects cancellation (not consumed).
+- Both transitions are CAS on current state within `BEGIN IMMEDIATE` transaction.
+
+**Recovery after restart:**
+- Interrupted `awaiting_report` and `awaiting_impl_authorization` attempts are detected on startup by `CodingAgentRecoveryService.recover()`.
+- Their status is preserved (not reset to `draft`). No automatic dispatch occurs.
+- Only `dispatching` and `mock_execution` states are transitioned to `interrupted` on restart.
+
+**No duplicate approval consumption:**
+- CAS on `consumed_at IS NULL` (via Wave 1 `consume_atomic`) prevents double-consumption. A second `dispatch_protected_txn` for the same step returns `ApprovalNotConsumableError`.
+
+**No unintended automatic dispatch:**
+- `real_when_isolated` NEVER auto-dispatches even after isolation prerequisites might theoretically become available. The user must explicitly request a new execution attempt.
+
+This is compatible with the Wave 1 engine: the existing `WAITING_APPROVAL` step state supports the KiroHandoffExecutor durable wait pattern without any new step states.
 
 ### 3.3 Prompt Template Structure
 
@@ -175,6 +238,12 @@ Implements the Wave 1 `Executor` Protocol.
 
 ### 4.1 Execution Modes and Outcomes
 
+> **Execution mode vs. outcome distinction:** The requested execution mode is `manual | mock | real_when_isolated`. These are the only values accepted in `execution_mode` input fields, database constraints, and API schemas. `real_execution_blocked` is an **outcome state**, not a requested mode. It arises when `real_when_isolated` is requested but isolation prerequisites are unmet at runtime. `blocked` is never a valid requested mode.
+>
+> **Manual mode:** MUST NOT launch a coding-agent subprocess. No process, shell command, or external binary is invoked at any point.
+>
+> **Real automated execution:** Unconditionally blocked in Wave 3. All `real_when_isolated` requests result in `real_execution_blocked` outcome.
+
 | Requested Mode | Condition | Outcome State |
 |---|---|---|
 | `mock` | Always | `mock_execution` → `completed` |
@@ -195,7 +264,7 @@ class CodexExecutionInput(ExecutorModel):
     task_ids: list[str]                # non-empty; no wildcard "*"
     repo_identity: str
     workspace_identity: str
-    execution_mode: Literal["mock", "manual", "real_when_isolated"]
+    execution_mode: Literal["manual", "mock", "real_when_isolated"]   # canonical 3-value enum; "blocked" is an outcome, not a mode
     deadline_at: datetime              # UTC; must be future
     baseline_commit: str | None        # set by WorkspaceValidator
     # canonical_execution_input_hash is computed server-side; never from client
@@ -458,7 +527,34 @@ def verify_git_identity(workspace: Path, expected_repo_identity: str) -> str:
     return baseline_commit
 ```
 
-Supported git layouts: standard `.git` directory, `.git` file for worktrees. Submodules with `.git` files are also supported. `.git` files with non-`gitdir:` content are rejected. External git objects (alternates) are not followed.
+### 6.3 Git Metadata Path Validation
+
+All git metadata paths are validated against the approved workspace root before reading. This subsection defines the mandatory validation rules applied by `WorkspaceValidator.verify_git_identity()`.
+
+**Paths subject to validation:** `.git` dir, `.git` indirection files, `gitdir:` targets, `commondir` references, `config`, `HEAD`, ref files (`refs/heads/*`, `refs/tags/*`), `packed-refs`.
+
+**Validation rules (all mandatory):**
+
+1. **Boundary enforcement:** Every resolved git metadata path MUST be inside an approved workspace root (same `is_relative_to()` check as the workspace path itself). Paths outside approved roots raise `WorkspaceError("GIT_METADATA_PATH_OUTSIDE_ROOT")`.
+
+2. **Symlink rejection:** Git metadata paths are subject to the same symlink policy as workspace paths (§6.1 and REQ-W3.5.2). Symbolic links, Windows junctions, and reparse points in git metadata paths are rejected or validated per `WORKSPACE_FOLLOW_SYMLINKS`.
+
+3. **Bounded reads:**
+   - `HEAD`, `gitdir`, `commondir` files: max **4 KB**; exceeding this raises `WorkspaceError("GIT_METADATA_TOO_LARGE")`.
+   - `config`: max **64 KB**; exceeding this raises `WorkspaceError("GIT_METADATA_TOO_LARGE")`.
+   - `packed-refs`: max **1 MB**; exceeding this raises `WorkspaceError("GIT_METADATA_TOO_LARGE")`.
+
+4. **No config includes:** Git `config` files containing `[include]` or `[includeIf]` sections are rejected with `WorkspaceError("GIT_CONFIG_INCLUDES_UNSUPPORTED")`. Config includes are never followed.
+
+5. **No external object alternates:** If `objects/info/alternates` exists, the repository is rejected with `WorkspaceError("GIT_ALTERNATES_UNSUPPORTED")`. External object alternates are never followed.
+
+6. **Standard layout requirement:** `.git` MUST be a directory for standard (non-worktree) repos. `.git` as a file (worktree/submodule gitdir indirection) is supported ONLY if the `gitdir:` target resolves within an approved workspace root; otherwise return `WorkspaceError("UNSUPPORTED_REPO_LAYOUT")`.
+
+7. **Submodule deferral:** Repositories containing a `.gitmodules` file at the root are rejected with `WorkspaceError("UNSUPPORTED_REPO_LAYOUT")`. Submodule workspace validation is deferred to a future wave.
+
+8. **TOCTOU residual limitation:** Validation and read are not atomic at the application level. A file could be replaced between the validation check and the read. This is a known, documented residual risk. Mitigation is defense-in-depth: Wave 6 OS-level sandboxing (operator-controlled workspace roots, sandboxed subprocess boundary) provides real mitigation; Wave 3 path checking is defense-in-depth only.
+
+Supported git layouts: standard `.git` directory, `.git` file for worktrees with target inside approved root. `.git` files with non-`gitdir:` content are rejected. External git objects (alternates) are not followed.
 
 ---
 
@@ -583,7 +679,20 @@ The Wave 3 implementation step's `inputs_json` contains the full binding payload
 
 This payload is **persisted in `workflow_step_runs.inputs_json`** before authorization is requested. The `canonical_hash` of this JSON is `parameters_hash`. Changing any field requires a new execution plan and step (the orchestrator creates a new run if needed), which produces a different `parameters_hash`, preventing stale-input acceptance.
 
-### 8.4 Idempotency Strategy
+### 8.5 Kiro Approval Ordering Enforcement at SpecificationApprovalService
+
+For Wave 3 workflow-linked specification versions, `SpecificationApprovalService` MUST enforce the following prerequisite check before creating or resolving any specification approval record:
+
+1. A completed `kiro_handoffs` row (or `handoff_records` row with `status = 'report_validated'`) MUST exist whose `spec_version_digest` matches the current `SpecificationVersion.content_digest`.
+2. The handoff's `workflow_run_id` MUST match the current workflow run.
+
+If either check fails, the approval request is rejected with `KIRO_VERIFICATION_REQUIRED`.
+
+This check is enforced in the `_eligible()` method of `SpecificationApprovalService` (the same method that checks review status and digest integrity) for Wave 3 workflow-linked specifications. It is enforced **server-side regardless of UI state**.
+
+**Stale evidence invalidation rule:** When a new specification version row is created (spec revision), the new row is created with `kiro_verification_id = NULL`. A validated Kiro handoff for the prior version is not valid evidence for the new version.
+
+**Legacy Wave 2 compatibility:** The prerequisite check applies only when the specification is associated with a Wave 3 workflow run (`workflow_run_id IS NOT NULL` and the workflow uses `implementation_authorization` as a protected operation). Legacy Wave 2 standalone approvals (not linked to a Wave 3 workflow) are unaffected; their approval path uses the existing `SpecificationApprovalRepository.create()` path without the Kiro prerequisite gate.
 
 **Replacing the global hash uniqueness constraint:** The v1.0.0 design had a `UNIQUE INDEX idx_ep_hash ON execution_plans(canonical_execution_input_hash)`, which would prevent legitimate retries across different workflow runs. This is replaced with:
 
@@ -726,17 +835,36 @@ CREATE UNIQUE INDEX uidx_hr_active_per_version ON handoff_records(specification_
 CREATE TABLE handoff_artifacts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     handoff_record_id INTEGER NOT NULL REFERENCES handoff_records(id) ON DELETE CASCADE,
+    execution_plan_id INTEGER REFERENCES execution_plans(id),  -- NOT NULL for codex_prompt artifacts; NULL for kiro_prompt/kiro_report
     artifact_type TEXT NOT NULL
         CHECK (artifact_type IN ('kiro_prompt','kiro_report','codex_prompt')),
-    content_hash TEXT NOT NULL,
+    content_hash TEXT NOT NULL,          -- SHA-256 of content; required; never overwritten after publication
     content_size_bytes INTEGER NOT NULL,
     storage_key TEXT NOT NULL,          -- DevFlow-generated safe identifier; never client-supplied
+    status TEXT NOT NULL DEFAULT 'draft'
+        CHECK (status IN ('draft','prompt_publishing','published')),  -- for codex_prompt; kiro artifacts go directly to 'published'
     created_at TEXT NOT NULL
 );
 CREATE INDEX idx_ha_handoff ON handoff_artifacts(handoff_record_id);
+CREATE INDEX idx_ha_plan ON handoff_artifacts(execution_plan_id);
 CREATE INDEX idx_ha_hash ON handoff_artifacts(content_hash);
 CREATE INDEX idx_ha_type ON handoff_artifacts(artifact_type);
 ```
+
+> **Artifact ownership rules:**
+>
+> - Each exported Codex prompt artifact (`artifact_type = 'codex_prompt'`) belongs to exactly one `execution_plans` row via `execution_plan_id FK NOT NULL`. Lookup by `handoff_record_id` alone is prohibited for `codex_prompt` artifacts; lookup MUST include `execution_plan_id`.
+> - A `handoff_records` row may be referenced by multiple independently authorized `execution_plans` rows, but each plan has its own `codex_prompt` artifact.
+> - `kiro_prompt` and `kiro_report` artifacts belong to the handoff only (`execution_plan_id = NULL`).
+>
+> **Immutable content:**
+> - Prompt content is stored immutably: once `status = 'published'`, the `content` and `content_hash` are never overwritten. Any re-read returns the stored content.
+>
+> **Atomic publication:**
+> - Publication is atomic: a single `BEGIN IMMEDIATE` transaction sets `execution_plans.status = 'prompt_published'` and either inserts the artifact row (first export) or verifies the existing row matches (idempotent re-export).
+>
+> **Crash-safe recovery:**
+> - On restart, any `execution_plans` row with `status = 'prompt_publishing'` (intermediate state from an interrupted publication) is recovered by re-publishing the prompt. This is idempotent because the content hash is deterministic from the immutable execution input fields.
 
 #### handoff_findings
 
@@ -766,15 +894,17 @@ CREATE INDEX idx_hf_category ON handoff_findings(category);
 CREATE TABLE execution_plans (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     handoff_record_id INTEGER NOT NULL REFERENCES handoff_records(id),
-    workflow_run_id INTEGER REFERENCES workflow_runs(id),
-    workflow_step_run_id INTEGER REFERENCES workflow_step_runs(id),
+    workflow_run_id INTEGER NOT NULL REFERENCES workflow_runs(id),          -- NOT NULL: standalone plans not supported in Wave 3
+    workflow_step_run_id INTEGER NOT NULL REFERENCES workflow_step_runs(id), -- NOT NULL: every plan must belong to a step
     specification_version_id INTEGER NOT NULL REFERENCES specification_versions(id),
     artifact_digest TEXT NOT NULL,
     task_ids_json TEXT NOT NULL,
     repo_identity TEXT NOT NULL,
     workspace_identity TEXT NOT NULL,
+    baseline_commit   TEXT NOT NULL,   -- git commit SHA of the repo baseline; persisted before auth request
+    deadline_at       TEXT,            -- optional execution deadline (UTC ISO 8601, may be NULL)
     execution_mode TEXT NOT NULL
-        CHECK (execution_mode IN ('mock','manual','real_when_isolated')),
+        CHECK (execution_mode IN ('manual','mock','real_when_isolated')),  -- requested mode only; 'blocked' is an outcome state
     canonical_execution_input_hash TEXT NOT NULL,  -- not globally unique; scoped by step
     status TEXT NOT NULL DEFAULT 'draft'
         CHECK (status IN ('draft','authorized','consumed','cancelled','stale')),
@@ -785,6 +915,16 @@ CREATE TABLE execution_plans (
 CREATE INDEX idx_ep_handoff ON execution_plans(handoff_record_id);
 CREATE INDEX idx_ep_hash ON execution_plans(canonical_execution_input_hash);
 ```
+
+> **Immutable plan persistence requirement:** The complete immutable execution plan — including `baseline_commit`, `deadline_at`, and `canonical_execution_input_hash` — MUST be persisted in a single atomic transaction before `implementation_authorization` is requested. Authorization input reconstruction from mutable client data is prohibited.
+>
+> **Mandatory workflow ownership:** Every authorized execution plan MUST be linked to a workflow run and step (`workflow_run_id NOT NULL`, `workflow_step_run_id NOT NULL`). Standalone (non-workflow) execution plans are not supported in Wave 3.
+>
+> **Replacement plans:** After any input field changes (task IDs, artifact digest, baseline commit, deadline, execution mode), a new `execution_plans` row MUST be created and fresh authorization requested. The old plan's authorization is not transferable.
+>
+> **Crash-safe first transition:** The first manual prompt export, authorization consumption, durable prompt publication, and execution-attempt state transition MUST be crash-safe: a single `BEGIN IMMEDIATE` transaction spans the plan status update and attempt creation.
+>
+> **Authorization consumption guard:** Authorization MUST NOT be consumed for `real_when_isolated` mode when isolation prerequisites are unmet at execution time. The `IsolationGate` check runs before `dispatch_protected_txn`.
 
 #### execution_attempts
 
