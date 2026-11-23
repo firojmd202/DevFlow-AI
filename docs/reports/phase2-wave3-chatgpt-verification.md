@@ -1,28 +1,29 @@
-# Phase 2 Wave 3 — ChatGPT Verification Index
+# Phase 2 Wave 3 — ChatGPT Verification Index (v1.0.1)
 
-**Package:** Phase 2 Wave 3 Specification Review
+**Package:** Phase 2 Wave 3 Specification Review — v1.0.1
 **Date:** 2026-11-23
 **Branch:** `feature/phase2-wave3-coding-agent-integration`
 **Git baseline:** `ee57dc7` (Wave 2 merged, develop HEAD)
+**Supersedes:** v1.0.0 verification index (same date)
 
 ---
 
 ## What This Package Is
 
-This package contains the complete specification for Phase 2 Wave 3 of DevFlow AI: **Kiro Guided Handoff and Codex CLI Integration**. The specification covers the design, requirements, and implementation tasks for integrating Kiro (spec verification) and Codex CLI (implementation) into the existing DevFlow AI workflow engine.
+This is the corrected Wave 3 specification following a ChatGPT review of v1.0.0. All 10 review findings (F01–F10) have been addressed. The specification now covers manual execution as a first-class mode, corrected authorization binding against the actual Wave 1 source, corrected workspace validation algorithm, correct approval ordering (Kiro before final spec approval), durable human-wait state design, corrected artifact ownership model, non-overridable finding categories, and updated capability claims.
 
-This is a **specification review package only**. No production code has been implemented. The reviewer's job is to verify correctness, consistency, completeness, security, and coherence of the specification documents.
+**This is specification only. No production code has been implemented.**
 
 ---
 
 ## Where to Start
 
-1. Read `docs/reports/phase2-wave3-spec-readiness.md` — this is the high-level summary with architecture overview, capability verdicts, and readiness assessment.
-2. Read `.kiro/specs/phase2-wave3-coding-agent-integration/requirements.md` — the complete requirements specification.
-3. Read `.kiro/specs/phase2-wave3-coding-agent-integration/design.md` — the architecture and design decisions.
-4. Read `.kiro/specs/phase2-wave3-coding-agent-integration/tasks.md` — the implementation task breakdown.
-5. Use `docs/reports/phase2-wave2-closure-verification.md` as background on what was delivered in Wave 2.
-6. Use `docs/planning/phase2-roadmap.md` to understand the overall six-wave plan.
+1. `docs/reports/phase2-wave3-spec-resolution-v1.0.1.md` — Resolution matrix for all F01–F10 findings. Read this first to understand what changed.
+2. `docs/reports/phase2-wave3-spec-readiness.md` — High-level architecture summary and readiness verdict.
+3. `.kiro/specs/phase2-wave3-coding-agent-integration/requirements.md` — Full requirements (v1.0.1).
+4. `.kiro/specs/phase2-wave3-coding-agent-integration/design.md` — Architecture and ADRs (v1.0.1).
+5. `.kiro/specs/phase2-wave3-coding-agent-integration/tasks.md` — 12 tasks; 28-criterion acceptance suite (v1.0.1).
+6. `docs/reports/phase2-wave2-security-closure-resolution.md` — Security CI failure investigation and offline scan results.
 
 ---
 
@@ -30,85 +31,120 @@ This is a **specification review package only**. No production code has been imp
 
 | File | Purpose |
 |---|---|
-| `.kiro/specs/phase2-wave3-coding-agent-integration/requirements.md` | Primary review target: 60 requirements across 10 areas + security, with EARS-style acceptance criteria |
-| `.kiro/specs/phase2-wave3-coding-agent-integration/design.md` | Architecture, state machines, data model (6 new tables), API route table, 10 ADRs, security architecture |
-| `.kiro/specs/phase2-wave3-coding-agent-integration/tasks.md` | 12 implementation tasks (W3.T1–W3.T12) with acceptance criteria and 15-criterion acceptance test suite |
-| `docs/reports/phase2-wave3-spec-readiness.md` | Readiness report: architecture summary, capability verdicts, traceability results, open decisions |
-| `docs/reports/phase2-wave2-closure-verification.md` | Wave 2 closure evidence: merge verification, TruffleHog scan (0 secrets), Alembic head, Dependabot PR #20 |
-| `docs/planning/phase2-roadmap.md` | Phase 2 six-wave roadmap: context for where Wave 3 fits in the overall plan |
+| `.kiro/specs/phase2-wave3-coding-agent-integration/requirements.md` | ~65 requirements, 10 areas + 10 security; corrected workflow ordering, manual mode, non-overridable findings, corrected report binding |
+| `.kiro/specs/phase2-wave3-coding-agent-integration/design.md` | Architecture; corrected WorkspaceValidator algorithm; corrected authorization binding; 7-table data model; 20 API routes; 10 ADRs |
+| `.kiro/specs/phase2-wave3-coding-agent-integration/tasks.md` | 12 tasks; W3.T12 with 28 acceptance sub-criteria |
+| `docs/reports/phase2-wave3-spec-resolution-v1.0.1.md` | One-to-one resolution matrix for F01–F10 |
+| `docs/reports/phase2-wave3-spec-readiness.md` | Readiness assessment (v1.0.1) |
+| `docs/reports/phase2-wave3-chatgpt-verification.md` | This file — review index |
+| `docs/reports/phase2-wave2-security-closure-resolution.md` | Security CI investigation; offline scan evidence |
+| `docs/planning/phase2-roadmap.md` | Phase 2 six-wave roadmap (reference only) |
 
 ---
 
-## What to Check
+## What Changed from v1.0.0
+
+### F01 — Manual mode
+- `manual` is now a first-class mode (alongside `mock` and `real_when_isolated`).
+- `real_execution_blocked` is an outcome state, not a mode.
+- Manual mode has a complete lifecycle: plan → authorization (consumed at first export) → `awaiting_impl_report` → validation → `completed`.
+- Added REQ-W3.1.2–W3.1.6; execution attempt state machine expanded.
+
+### F02 — Authorization binding
+- Corrected to use actual Wave 1 `request_bound_approval(run_id, step_run_id)` (not a caller-supplied hash).
+- Binding payload embedded in `step.inputs_json`; `parameters_hash = canonical_hash(step.inputs_json)`.
+- Global hash uniqueness constraint replaced with scoped `UNIQUE(workflow_run_id, workflow_step_run_id)`.
+- Added REQ-W3.4.6 (complete atomic validation conditions).
+
+### F03 — Report validation
+- Both report schemas now include full binding fields (plan_id, spec_version, artifact_digest, authorized_task_ids, etc.).
+- Added checks: MISSING_TASK_RESULTS, DUPLICATE_TASK_RESULTS, CONTRADICTORY_VERDICT, INCONSISTENT_TEST_COUNTS, REPORT_ALREADY_SUBMITTED.
+- DevFlow verification result (`devflow_verification_passed`) separated from self-reported verdict.
+
+### F04 — Workspace validation
+- Algorithm corrected: intermediate symlink component check precedes `Path.resolve()`.
+- `is_relative_to()` replaces string prefix matching.
+- UNC/device paths explicitly rejected on Windows.
+- TOCTOU risk documented as residual.
+- Git config reading uses file parsing, not subprocess.
+
+### F05 — Approval ordering
+- Correct 17-stage workflow: Kiro verification (stages 4–9) precedes final spec approval (stage 10).
+- System rejects final approval before Kiro validation recorded.
+
+### F06 — Durable wait
+- `awaiting_report` and `awaiting_impl_report` are non-running durable wait states.
+- No executor coroutine or lease held during wait.
+- Wave 1 `WAITING_APPROVAL` step state reused (no new step states added).
+- Recovery explicitly preserves durable wait states; only interrupts active execution states.
+
+### F07 — Artifact ownership
+- Split into `handoff_artifacts` (Kiro prompts/reports; FK → handoff_records) and `execution_artifacts` (impl artifacts; FK → execution_attempts).
+- 7 tables total (was 6).
+- Unique constraint on `(handoff_record_id, finding_id)` in `handoff_findings`.
+
+### F08 — Finding override
+- 7 non-overridable finding categories defined (security, integrity_failure, digest_mismatch, etc.).
+- No bypass UI for non-overridable findings.
+- Advisory acknowledgment (with justification) permitted only for non-security major findings.
+
+### F09 — Capability claims
+- Kiro section: "guided handoff is the selected scope" (not a claim that no API exists).
+- Codex CLI: capability marked "unavailable / unverified"; exact flags deferred to Wave 6.
+
+### F10 — API endpoints
+- Updated to 20 endpoints; added idempotent prompt GET, impl report submit, report validation status.
+- Authorization request delegates to Wave 1; Wave 1 approve endpoint reused for granting.
+
+---
+
+## What to Review
 
 ### In `requirements.md`
 
-1. **Requirement completeness:** Do all 10 requirement areas provide sufficient coverage for the stated Wave 3 objective? Are there gaps?
-2. **Acceptance criteria:** Do all acceptance criteria have unique IDs (REQ-W3.X.Y.Z)? Are they testable?
-3. **Isolation gate requirements (W3.8):** Is the fail-closed design correctly specified? Is there any path that bypasses the gate via configuration?
-4. **Security requirements (W3.S):** Do the security requirements cover all threats in the threat analysis table? Are any threats under-mitigated?
-5. **Manual workflow (W3.1):** Does the 14-stage manual workflow cover the full user journey without gaps?
-6. **Handoff state machine (W3.2):** Are all state transitions correct? Are all terminal states identified?
-7. **Report validation (W3.6):** Is the deterministic validation design sufficient to prevent malicious reports from influencing system state?
-8. **Implementation authorization (W3.4):** Does the reuse of Wave 1 `implementation_authorization` correctly cover all required binding fields?
+1. **Workflow ordering (W3.1):** Does the 17-stage sequence correctly require Kiro validation before final approval? Is the prohibition on approving before Kiro validation (REQ-W3.1.1.3) correct?
+2. **Manual mode lifecycle (W3.1.2–W3.1.6):** Is the authorization consumption at first export (REQ-W3.1.3.1) correct? Is re-read idempotency (REQ-W3.1.3.2) correctly specified?
+3. **Non-overridable findings (W3.2.5):** Is the list of 7 non-overridable categories complete? Are any important categories missing?
+4. **Authorization binding (W3.4.1):** Does the binding payload in `step.inputs_json` cover all required fields for a secure authorization? Is `kiro_handoff_id` appropriate as a binding field?
+5. **Workspace validation (W3.5.1–W3.5.3):** Is the corrected algorithm description correct? Is the TOCTOU residual risk documented appropriately?
+6. **Report validation (W3.6.1–W3.6.5):** Are the validation checks sufficient? Is the separation of `devflow_verification_passed` from `self_reported_verdict` correctly specified?
+7. **Isolation gate (W3.8.2):** Is REQ-W3.8.2.3 (future prerequisite name must be verified against system state) correctly specified?
+8. **Security requirements (W3.S.1–W3.S.10):** Does the clarification that sanitization is defense-in-depth (not elimination) in W3.S.1 correctly characterize the limitation?
 
 ### In `design.md`
 
-1. **Architecture consistency:** Does the design preserve Phase 0/1/Wave 1/Wave 2 layering? Are there any changes to existing service contracts?
-2. **State machines (§3.1, §9.1):** Are the state machines complete? Are there any missing transitions or unreachable terminal states?
-3. **Data model (§10):** Do the 6 new tables have correct schemas, FK references, and indexes? Does migration 010 chain correctly from 009?
-4. **IsolationGate (§5):** Is the fail-closed design correctly implemented? Does the pseudocode in §5.1 correctly block execution when prerequisites are empty or unrecognized?
-5. **WorkspaceValidator (§6.1):** Is the canonical path algorithm correct on both Windows and Linux? Does it correctly handle symlinks?
-6. **ADRs (§13):** Are all 10 ADRs decided? Are the tradeoffs correctly described? Are any decisions missing?
-7. **API route table (§11):** Are all 17 endpoints listed? Do HTTP status codes match the Wave 2 async pattern?
-8. **Canonical execution input hash (§8.1):** Is the hash construction correct and sufficient to detect all stale input cases?
+1. **WorkspaceValidator (§6.1):** Is the corrected algorithm correct? Does `_check_intermediate_components()` correctly detect symlinks before `resolve()`?
+2. **Authorization design (§8.1–8.3):** Does the Wave 1 interface description match the actual source (`request_bound_approval(run_id, step_run_id)`, `dispatch_protected_txn`)? Is the binding payload complete?
+3. **State machines (§9.1–9.2):** Are the handoff and execution attempt state machines complete? Do all terminal states appear in both the diagram and the DB CHECK constraint?
+4. **Data model (§10.1):** Is the split between `handoff_artifacts` and `execution_artifacts` correct? Does `execution_plans` have the correct scoped uniqueness constraint?
+5. **ADR-W3-06 (§13):** Does the clarification "deterministic validation is structural/integrity-based, not a semantic guarantee" correctly characterize what DevFlow AI verifies?
+6. **Non-overridable finding categories (§14.3):** Is the list complete and correct?
 
 ### In `tasks.md`
 
-1. **Traceability:** Does every task map to at least one requirement? Does every requirement map to at least one task?
-2. **Dependencies:** Are the task dependencies correctly ordered (no circular dependencies)?
-3. **W3.T12 acceptance criteria:** Do the 15 sub-criteria cover all security invariants? Is the test suite comprehensive enough?
-4. **Task sizing:** Are the L/M/S estimates reasonable for the described work?
-5. **Mock execution test (W3.T12.9):** Does the test correctly verify no subprocess is launched?
-6. **Recovery test (W3.T12.10):** Does the test correctly verify no AI redispatch occurs on restart?
+1. **W3.T12.1–W3.T12.28:** Are the 28 acceptance sub-criteria sufficient to cover all security invariants from F01–F10?
+2. **W3.T12.3 (idempotent prompt re-read):** Is the test correctly specified? Does it verify no second `consume_atomic` is called?
+3. **W3.T12.6 (real execution blocked):** Does the test correctly cover all configuration variants?
+4. **W3.T12.27 (non-overridable findings):** Is the test sufficient to verify the enforcement mechanism?
+5. **Task dependencies:** Does W3.T5 correctly depend on W3.T3, W3.T4, and W3.T6?
 
 ### Cross-document checks
 
-1. **Consistency:** Do the state machine in `design.md §9.1` and the requirements in `requirements.md §W3.7` describe the same states and transitions?
-2. **Data model vs requirements:** Does the `handoff_records` table (design.md §10.1) contain all fields required by REQ-W3.2.1?
-3. **API routes vs requirements:** Do the 17 API endpoints (design.md §11) cover all REQ-W3.9.1–W3.9.5 requirements?
-4. **Security:** Does the threat analysis (requirements.md threat table) map to mitigations in design.md §14.2?
-5. **Wave 1/Wave 2 non-regression:** Does any Wave 3 design element change or contradict an existing Wave 1/Wave 2 contract?
+1. **F02 correctness:** Does design.md §8.1 accurately describe the Wave 1 source interface? Can the described binding mechanism work without changes to Wave 1?
+2. **F05 ordering:** Does the handoff state machine (design.md §3.1) correctly enforce that `handoff_created` requires spec in `approved` or `ready_for_approval`? Is this compatible with the Wave 2 spec state machine?
+3. **F06 durable wait:** Does the design correctly explain how `KiroHandoffExecutor.execute()` maps to `WAITING_APPROVAL`? Is this compatible with the Wave 1 executor protocol without changes?
+4. **Security workflow:** Does the security closure resolution report (phase2-wave2-security-closure-resolution.md) correctly document that Security CI is not currently passing on GitHub, only the offline scan is authoritative?
 
 ---
 
-## Key Design Decisions for Review
+## Key Decisions for Verification
 
-| Decision | Location | What to Verify |
+| Decision | Location | Verify |
 |---|---|---|
-| Kiro guided handoff only (no programmatic API) | ADR-W3-02, design §3 | Is the absence of a Kiro API correctly documented? Is the handoff design robust without a programmatic API? |
-| Codex CLI contract but not implemented | ADR-W3-03, design §4 | Is the contract sufficient for Wave 6 implementation? Are any required flags missing or invented? |
-| IsolationGate fail-closed | ADR-W3-07, design §5, REQ-W3.8 | Can the gate be bypassed via any code path shown? |
-| Reuse Wave 1 `implementation_authorization` | ADR-W3-04, design §8 | Is the binding sufficient? Are the CAS and expiry mechanisms correct? |
-| Migration 010 additive only | ADR-W3-09, design §10 | Does the migration alter any existing table? Is it correctly chained from 009? |
-| No GitHub operations in Wave 3 | ADR-W3-10, REQ-W3.S.7 | Is this restriction correctly enforced throughout the spec? |
-
----
-
-## Background Context
-
-- **Wave 1** delivered the `WorkflowOrchestrator`, `ExecutorRegistry`, `ApprovalService`, and 8-state step lifecycle (migration 008).
-- **Wave 2** delivered AI specification generation/review, `SpecificationApprovalService`, and 7 new tables (migration 009).
-- **Wave 3** (this spec) adds Kiro handoff and Codex CLI contract, 2 new executors, 5 new services, 6 new tables (migration 010).
-- **Wave 6** (future) will add OS-level isolation that enables real Codex execution.
-
-The Wave 3 spec deliberately ships no real coding-agent execution. All `real_when_isolated` requests are blocked by `IsolationGate` returning `ISOLATION_PREREQUISITES_NOT_MET`.
-
----
-
-## Reviewer Notes
-
-- The Kiro integration section (W3.2, design §3) reflects the confirmed finding that no stable programmatic Kiro API exists. If this is incorrect or outdated, the entire handoff model needs redesign.
-- The Codex CLI section (W3.3, design §4) is based on published documentation as of November 2026. If the CLI has changed, the invocation contract (§4.1) needs updating.
-- Security requirements (W3.S) are intentionally conservative. If any security requirement is too restrictive for the intended use case, please flag specifically which one and why.
-- The 60-requirement count (requirements.md) includes both the 50 numbered WHEN/THEN requirements and the 10 security requirements (REQ-W3.S.1–W3.S.10). The readiness report treats these as the full set.
+| Authorization via `request_bound_approval(run_id, step_run_id)` | design.md §8.1 | Does this match the actual Wave 1 source? |
+| Durable wait via `WAITING_APPROVAL` step state | design.md §3.2 | No new Wave 1 step state needed? |
+| Intermediate symlink check before resolve | design.md §6.1 | Is the algorithm logically correct? |
+| Non-overridable findings: 7 categories | design.md §14.3 | Is the list complete? |
+| `real_execution_blocked` as outcome, not mode | requirements.md overview | Is the mode/state distinction clear throughout? |
+| 20 API endpoints (updated from 17) | design.md §11 | Are idempotent GET endpoints correctly specified? |
+| 7 tables (updated from 6) | design.md §10.1 | Is artifact ownership split correct? |
