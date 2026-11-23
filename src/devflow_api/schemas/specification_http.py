@@ -6,7 +6,11 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from devflow_api.schemas.approval import ApprovalDecision
-from devflow_api.schemas.specification import ArtifactType, SpecificationRequestCreate
+from devflow_api.schemas.specification import (
+    ArtifactType,
+    MCPContextRequest,
+    SpecificationRequestCreate,
+)
 
 
 class SpecificationCreateBody(SpecificationRequestCreate):
@@ -35,6 +39,10 @@ class AttemptTrigger(BaseModel):
     expected_version: int | None = Field(default=None, gt=0)
     provider_id: Literal["ollama", "openai"] | None = None
     model_id: str | None = Field(default=None, min_length=1, max_length=256)
+
+
+class GenerationTrigger(AttemptTrigger):
+    mcp_contexts: tuple[MCPContextRequest, ...] = Field(default=(), max_length=16)
 
 
 class TaskResponse(BaseModel):

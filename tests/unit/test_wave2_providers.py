@@ -5,12 +5,14 @@ import builtins
 import json
 from collections.abc import Awaitable, Callable
 from typing import cast
+from unittest.mock import AsyncMock, Mock, call
 
 import httpx
 import pytest
 from pydantic import SecretStr, ValidationError
 
 from devflow_api.main import create_app
+from devflow_api.providers import http as provider_http
 from devflow_api.providers.exceptions import (
     ProviderAuthError,
     ProviderConfigurationError,
@@ -223,7 +225,9 @@ async def test_ollama_rejects_invalid_structured_output(
     assert len(requests) == 1
 
 
-async def test_ollama_retries_twice(install_transport: InstallTransport) -> None:
+async def test_ollama_retries_twice(
+    install_transport: InstallTransport, monkeypatch: pytest.MonkeyPatch
+) -> None:
     calls = 0
 
     def respond(request: httpx.Request) -> httpx.Response:
@@ -234,8 +238,12 @@ async def test_ollama_retries_twice(install_transport: InstallTransport) -> None
         return httpx.Response(200, json={"response": "success"})
 
     requests = install_transport(respond)
+    clock = Mock(wraps=asyncio)
+    clock.sleep = AsyncMock()
+    monkeypatch.setattr(provider_http, "asyncio", clock)
     assert (await ProviderFactory.create(Settings()).generate("prompt")).usage is None
     assert len(requests) == 3
+    assert clock.sleep.await_args_list == [call(1), call(2)]
 
 
 async def test_retry_budget_includes_backoff(install_transport: InstallTransport) -> None:

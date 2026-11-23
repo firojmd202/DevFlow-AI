@@ -1,9 +1,11 @@
 # DevFlow AI — Phase 2 Wave 2: v1.6.1 Readiness Report
 
+The results below are historical. The subsequent source inspection corrected the earlier MCP wiring verdict and exercised both entry paths through fake subprocesses. The current baseline is `431b406` on `codex/phase2-wave2-group-d`, with local implementation changes. The original error inventory is ten synchronous and five background codes, plus the additional review-specific `AI_REVIEW_MALFORMED`. [Current compliance evidence](phase2-wave2-final-compliance-verification.md)
+
 **Branch:** `codex/phase2-wave2-group-d`
 **HEAD:** `a14bd7c`
 **Spec version:** v1.6.1
-**Report date:** 2026-11-24
+**Historical artifact commit date:** 2026-11-23 (Asia/Calcutta, `431b406`)
 **Assessor:** Automated workflow step — spec v1.6.1 finalization
 
 ---

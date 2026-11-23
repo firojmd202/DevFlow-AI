@@ -129,6 +129,7 @@ class SpecificationGenerationService:
         contexts: Sequence[MCPContextRequest] = (),
         *,
         actor_id: str = "system",
+        workflow_run_id: int | None = None,
     ) -> GenerationAttempt:
         work = await self._claim(attempt_id)
         if work is None:
@@ -136,7 +137,9 @@ class SpecificationGenerationService:
         try:
             select_model(self._provider, self._settings, work.provider_id, work.model_id)
             await check_cancellation(self._sessions, GenerationAttempt, attempt_id)
-            context, context_truncated = await self._context(work, attempt_id, contexts)
+            context, context_truncated = await self._context(
+                work, attempt_id, contexts, workflow_run_id=workflow_run_id
+            )
             prompt, truncated = generation_prompt(work.draft, context, self._settings)
             await self._record_prompt(attempt_id, text_hash(prompt), truncated or context_truncated)
             response = await generate_with_deadline(
@@ -202,7 +205,12 @@ class SpecificationGenerationService:
             )
 
     async def _context(
-        self, work: GenerationWork, attempt_id: int, calls: Sequence[MCPContextRequest]
+        self,
+        work: GenerationWork,
+        attempt_id: int,
+        calls: Sequence[MCPContextRequest],
+        *,
+        workflow_run_id: int | None,
     ) -> tuple[str, bool]:
         if len(calls) > 16:
             raise MCPContextFailureError()
@@ -219,7 +227,8 @@ class SpecificationGenerationService:
                     call.arguments,
                     required=call.required,
                     specification_request_id=work.request_id,
-                    workflow_run_id=work.workflow_run_id,
+                    workflow_run_id=workflow_run_id or work.workflow_run_id,
+                    generation_attempt_id=attempt_id,
                 )
                 text.append(chunk.content)
                 truncated |= chunk.truncated

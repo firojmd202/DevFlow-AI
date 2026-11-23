@@ -3,14 +3,14 @@
 **Branch:** `codex/phase2-wave2-group-d`
 **HEAD:** `a14bd7c` (pre-commit baseline)
 **Spec version:** v1.6.0 → v1.6.1
-**Amendment date:** 2026-11-24
+**Amendment commit date:** 2026-11-23 (Asia/Calcutta, `431b406`)
 **Amendment authority:** User-approved via workflow session `wf_09580cc65549f924`
 
 ---
 
 ## 1. User Approval Record
 
-Both amendments were approved by the user in the workflow session that produced this step. The original user messages (`continue`) authorized the full workflow plan, which specified these exact changes as Amendment A (async HTTP contract) and Amendment B (focused test runtime).
+Both amendments were approved by the project owner in this explicit statement: “I approve the following Wave 2 specification amendments: asynchronous HTTP contract with existing error envelope; 120-second focused test budget with a 60-second advisory target.”
 
 ### Amendment A — Asynchronous HTTP contract
 

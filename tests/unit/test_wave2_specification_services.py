@@ -210,6 +210,7 @@ async def test_generation_uses_untrusted_mcp_and_persists_a_verified_version(
         required=False,
         specification_request_id=request_id,
         workflow_run_id=None,
+        generation_attempt_id=pending.id,
     )
     prompt = provider.generate.call_args.args[0]
     assert marker not in prompt.split("--- BEGIN FEATURE REQUEST", 1)[0]

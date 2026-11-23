@@ -2,6 +2,7 @@
 
 import json
 from pathlib import Path
+from typing import Literal
 from unittest.mock import AsyncMock
 
 import httpx
@@ -54,7 +55,7 @@ async def test_full_specification_lifecycle(
     api_app.state.ai_provider = provider
     api_app.state.workflow_sessions = session_factory
     invalid = await test_client.post(PREFIX, json={"title": "test", "actor_id": "override"})
-    assert invalid.status_code == 422
+    assert (invalid.status_code, invalid.json()["code"]) == (422, "INVALID_SPECIFICATION_REQUEST")
     created = await test_client.post(
         PREFIX, json={"title": "Feature", "description": "Store drafts."}
     )
@@ -77,21 +78,54 @@ async def test_full_specification_lifecycle(
     assert (await test_client.get(path + "/review/findings")).json()[
         "disclaimer"
     ] == AI_REVIEW_DISCLAIMER
+    stale_binding = await test_client.post(
+        path + "/approval", json={**binding, "content_digest": "0" * 64}
+    )
+    assert (stale_binding.status_code, stale_binding.json()["code"]) == (
+        409,
+        "APPROVAL_BINDING_MISMATCH",
+    )
+
+    async def artifact_content(content: str) -> None:
+        async with session_factory() as session, immediate_transaction(session):
+            await session.execute(
+                update(SpecificationArtifact)
+                .where(
+                    SpecificationArtifact.specification_version_id == version["id"],
+                    SpecificationArtifact.artifact_type == "design",
+                )
+                .values(content=content)
+            )
+
+    await artifact_content("Corrupted artifact fixture")
+    mismatch = await test_client.post(path + "/approval", json=binding)
+    assert (mismatch.status_code, mismatch.json()["code"]) == (409, "SPEC_DIGEST_MISMATCH")
+    await artifact_content(ARTIFACTS["design"])
     pending = await test_client.post(path + "/approval", json=binding)
     assert pending.status_code == 200
     decision = {**binding, "approval_id": pending.json()["id"], "decision": "approved"}
     assert (await test_client.post(path + "/approve", json=decision)).status_code == 200
     assert (await test_client.get(path)).json()["status"] == "approved"
-    assert (await test_client.post(path + "/approve", json=decision)).status_code == 409
-    assert (await test_client.delete(path + "/generate")).status_code == 409
-    assert (await test_client.delete(path)).status_code == 409
+    for response, code in (
+        (await test_client.post(path + "/approve", json=decision), "APPROVAL_ALREADY_RESOLVED"),
+        (await test_client.delete(path + "/generate"), "TASK_NOT_CANCELLABLE"),
+        (await test_client.delete(path), "SPEC_APPROVED_NO_OVERWRITE"),
+    ):
+        assert (response.status_code, response.json()["code"]) == (409, code)
     audit = (await test_client.get(path + "/audit")).json()
     assert {"spec_approved", "spec_review_completed"} <= {event["event_type"] for event in audit}
     async with session_factory() as session:
+        from devflow_api.models.specification import SpecificationApprovalRequest
+
         assert await session.scalar(select(ApprovalRequest.id)) is None
-        assert await SpecificationApprovalService(session).is_implementation_authorized(
-            created.json()["id"]
-        )
+        service = SpecificationApprovalService(session)
+        request_id = created.json()["id"]
+        assert await service.is_implementation_authorized(request_id)
+        consumed = await session.get(SpecificationApprovalRequest, pending.json()["id"])
+        assert consumed is not None and consumed.consumed_at is not None
+        async with immediate_transaction(session):
+            consumed.consumed_at = None
+        assert not await service.is_implementation_authorized(request_id)
 
 
 async def ready(
@@ -142,10 +176,11 @@ async def test_standalone_digest_failure_rolls_back_consume(
         assert not await service.is_implementation_authorized(req)
 
 
-@pytest.mark.parametrize("tampered", [False, True])
+@pytest.mark.parametrize("tampered", [False, True, "interrupted", "expired", "lease_expired"])
 async def test_bound_approval_preserves_independent_dispatch_gate(
     session_factory: async_sessionmaker[AsyncSession],
-    tampered: bool,
+    tampered: bool | Literal["interrupted", "expired", "lease_expired"],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     config = Settings()
     async with session_factory() as session:
@@ -201,7 +236,83 @@ async def test_bound_approval_preserves_independent_dispatch_gate(
         approval = await service.request_approval(req, actor, expected_version_id=ver)
         assert isinstance(approval, ApprovalRequest)
         approval_id = approval.id
-        if tampered:
+        assert not await service.is_implementation_authorized(req)
+        if tampered == "expired":
+            from devflow_core.exceptions import ApprovalExpiredError
+
+            monkeypatch.setattr(
+                service.workflow, "resolve", AsyncMock(side_effect=ApprovalExpiredError("expired"))
+            )
+            with pytest.raises(ApprovalExpiredError):
+                await service.resolve_bound(
+                    approval_id,
+                    "approved",
+                    actor,
+                    request_id=req,
+                    expected_version_id=ver,
+                    expected_digest=digest,
+                )
+            assert (await service.versions.get_version(ver)).status == "ready_for_approval"
+            return
+        if tampered == "lease_expired":
+            from datetime import UTC, datetime, timedelta
+
+            await service.resolve_bound(
+                approval_id,
+                "approved",
+                actor,
+                request_id=req,
+                expected_version_id=ver,
+                expected_digest=digest,
+            )
+            async with immediate_transaction(session):
+                approval.authorization_expires_at = datetime.now(UTC) - timedelta(seconds=1)
+            assert await WorkflowOrchestrator(session, settings=config)._advance(run_id) is None
+            pending = await session.scalar(
+                select(ApprovalRequest).where(
+                    ApprovalRequest.workflow_step_run_id == step_id,
+                    ApprovalRequest.status == "pending",
+                )
+            )
+            assert pending is not None and pending.id != approval_id
+            assert approval.consumed_at is None
+            return
+        if tampered == "interrupted":
+            from devflow_api.repositories.workflow_step_run import WorkflowStepRunRepository
+            from devflow_api.services.specification_recovery import SpecificationRecoveryService
+
+            await service.workflow.resolve(approval_id, "approved", actor)
+            recovery = SpecificationRecoveryService(session)
+            assert not any((await recovery.recover()).values())
+            assert not any((await recovery.recover()).values())
+            assert (
+                await service.versions.current_version(await service.versions.get_request(req))
+            ).status == "ready_for_approval"
+            assert not await service.is_implementation_authorized(req)
+            assert approval.parameters_hash is not None
+            with pytest.raises(ApprovalNotConsumableError):
+                await WorkflowStepRunRepository(session).dispatch_protected_txn(
+                    step_id,
+                    "worker",
+                    approval_id=approval_id,
+                    operation="specification_approval",
+                    parameters_hash=approval.parameters_hash,
+                    actor_id=actor,
+                )
+            orchestrator = WorkflowOrchestrator(session, settings=config)
+            assert (await orchestrator.start_or_resume(run_id)).status == "waiting_approval"
+            replacement = await session.scalar(
+                select(ApprovalRequest).where(
+                    ApprovalRequest.workflow_step_run_id == step_id,
+                    ApprovalRequest.status == "pending",
+                )
+            )
+            assert replacement is not None
+            assert replacement.id != approval_id
+            assert not await service.is_implementation_authorized(req)
+        elif tampered:
+            from devflow_api.models.specification import SpecificationVersion
+
             async with immediate_transaction(session):
                 await session.execute(
                     update(SpecificationArtifact)
@@ -210,6 +321,9 @@ async def test_bound_approval_preserves_independent_dispatch_gate(
                     )
                     .values(content="tampered")
                 )
+                version_row = await session.get(SpecificationVersion, ver)
+                assert version_row is not None
+                version_row.content_digest = "0" * 64
             with pytest.raises(SpecDigestMismatchError):
                 await service.resolve_bound(
                     approval_id,
@@ -232,6 +346,63 @@ async def test_bound_approval_preserves_independent_dispatch_gate(
                     parameters_hash=approval.parameters_hash,
                     actor_id=actor,
                 )
+            old_approval = await session.get(ApprovalRequest, approval_id, populate_existing=True)
+            assert old_approval is not None and old_approval.consumed_at is None
+            assert old_approval.status == "approved"
+            assert (await service.versions.get_version(ver)).status == "ready_for_approval"
+            from devflow_api.models.audit import WorkflowAuditLog
+            from devflow_api.services.specification_generation import SpecificationGenerationService
+
+            assert await session.scalar(
+                select(WorkflowAuditLog.id).where(
+                    WorkflowAuditLog.event_type == "spec_approval_digest_mismatch",
+                    WorkflowAuditLog.workflow_run_id == run_id,
+                )
+            )
+            await service.versions.transition_status(ver, "ready_for_approval", "revision_required")
+            request = await service.versions.get_request(req)
+            await service.versions.update_request(
+                req, service.versions.draft_input(request), expected_version=1, actor_id=actor
+            )
+            revised = ARTIFACTS.copy()
+            revised["design"] += "\n\nVerify the revision before dispatch."
+            generation = SpecificationGenerationService(
+                session_factory, stub(generation_response(revised))
+            )
+            attempt = await generation.start(req, expected_version=2)
+            assert (await generation.run(attempt.id)).status == "succeeded"
+            version = await service.versions.current_version(
+                await service.versions.get_request(req)
+            )
+            assert version.id != ver
+            review = SpecificationReviewService(session_factory, stub(review_response()))
+            review_attempt = await review.start(version.id)
+            assert (await review.run(review_attempt.id)).status == "succeeded"
+            fresh = await service.request_approval(req, actor, expected_version_id=version.id)
+            fresh_id = fresh.id
+            assert fresh_id != approval_id
+            assert version.content_digest and version.content_digest != digest
+            approved = await service.resolve_bound(
+                fresh_id,
+                "approved",
+                actor,
+                request_id=req,
+                expected_version_id=version.id,
+                expected_digest=version.content_digest,
+            )
+            assert approved.status == "approved"
+            with pytest.raises(ApprovalNotConsumableError):
+                await WorkflowStepRunRepository(session).dispatch_protected_txn(
+                    step_id,
+                    "worker",
+                    approval_id=approval_id,
+                    operation="specification_approval",
+                    parameters_hash=approval.parameters_hash,
+                    actor_id=actor,
+                )
+            await WorkflowOrchestrator(session, settings=config).start_or_resume(run_id)
+            consumed = await session.get(ApprovalRequest, fresh_id, populate_existing=True)
+            assert consumed is not None and consumed.consumed_at is not None
         else:
             approved = await service.resolve_bound(
                 approval_id,
@@ -254,8 +425,22 @@ async def test_bound_approval_preserves_independent_dispatch_gate(
                 )
         row = await session.get(ApprovalRequest, approval_id, populate_existing=True)
         assert row is not None and row.status == "approved" and row.consumed_at is None
-        if not tampered:
-            await WorkflowOrchestrator(session, settings=config).start_or_resume(run_id)
+        if tampered != "interrupted":
+            if not tampered:
+                orchestrator = WorkflowOrchestrator(session, settings=config)
+                first = await orchestrator._advance(run_id)
+                second = await orchestrator._advance(run_id)
+                assert first is not None and second is not None
+                assert first.approval_id == second.approval_id == approval_id
+                approval_ids = list(
+                    await session.scalars(
+                        select(ApprovalRequest.id).where(
+                            ApprovalRequest.workflow_step_run_id == step_id
+                        )
+                    )
+                )
+                assert approval_ids == [approval_id]
+                await orchestrator.start_or_resume(run_id)
             implementation = await session.scalar(
                 select(WorkflowStepRun).where(
                     WorkflowStepRun.workflow_run_id == run_id,
@@ -753,32 +938,45 @@ async def test_generation_provider_failure_and_cancellation_api(
     test_client: httpx.AsyncClient,
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    from devflow_api.providers.exceptions import ProviderUnavailableError
+    from devflow_api.providers.exceptions import ProviderTimeoutError, ProviderUnavailableError
     from devflow_api.services.specification_generation import SpecificationGenerationService
 
     rid, _ = await create_draft(session_factory)
     provider = stub(generation_response())
     provider.generate.side_effect = [
         ProviderUnavailableError("ollama", "mock"),
+        ProviderTimeoutError("ollama", "mock"),
+        ProviderResponse(content="invalid JSON", model="mock", provider_id="ollama"),
         generation_response(),
     ]
     api_app.state.ai_provider = provider
     api_app.state.workflow_sessions = session_factory
     path = f"{PREFIX}/{rid}"
     assert (await test_client.get(PREFIX, params={"limit": 1})).json()[0]["id"] == rid
-    assert (
-        await test_client.post(path + "/generate", json={"provider_id": "openai"})
-    ).status_code == 400
-    first = await test_client.post(path + "/generate")
-    assert first.status_code == 202
-    assert (await test_client.get(first.json()["poll_url"])).json()[
-        "error_code"
-    ] == "PROVIDER_UNAVAILABLE"
+    unconfigured = await test_client.post(path + "/generate", json={"provider_id": "openai"})
+    assert (unconfigured.status_code, unconfigured.json()["code"]) == (
+        400,
+        "PROVIDER_NOT_CONFIGURED",
+    )
+    for code in ("PROVIDER_UNAVAILABLE", "PROVIDER_TIMEOUT", "MALFORMED_OUTPUT"):
+        accepted = await test_client.post(path + "/generate")
+        assert accepted.status_code == 202
+        failed = await test_client.get(accepted.json()["poll_url"])
+        assert failed.status_code == 200 and failed.json()["status"] == "failed"
+        assert failed.json()["error_code"] == code
     worker = SpecificationGenerationService(session_factory, provider)
     pending = await worker.start(rid, expected_version=1)
+    conflict = await test_client.post(path + "/generate")
+    assert (conflict.status_code, conflict.json()["code"]) == (
+        409,
+        "GENERATION_ALREADY_IN_PROGRESS",
+    )
     cancelled = await test_client.delete(path + "/generate")
     assert cancelled.status_code == 200 and cancelled.json()["status"] == "cancellation_requested"
     assert (await worker.run(pending.id)).status == "cancelled"
+    terminal = await test_client.get(path + "/status")
+    assert terminal.status_code == 200 and terminal.json()["status"] == "cancelled"
+    assert terminal.json()["error_code"] == "PROVIDER_CANCELLED"
     assert (await test_client.post(path + "/generate")).status_code == 202
     assert (await test_client.get(path)).json()["status"] == "generated"
 
@@ -919,6 +1117,8 @@ async def test_review_cancel_and_resource_checks(
     api_app.state.ai_provider = provider
     service = SpecificationReviewService(session_factory, provider)
     pending = await service.start(version_id)
+    conflict = await test_client.post(prefix + "/review")
+    assert (conflict.status_code, conflict.json()["code"]) == (409, "REVIEW_ALREADY_IN_PROGRESS")
     assert (await test_client.delete(prefix + "/review")).status_code == 200
     assert (await service.run(pending.id)).status == "cancelled"
     assert (await test_client.delete(prefix + "/review")).status_code == 409
@@ -992,3 +1192,127 @@ async def test_provider_listing_never_pings_the_configured_cloud_provider(
     assert response.json()[1]["available"] is None
     assert synthetic_secret not in response.text
     cloud.check_availability.assert_not_awaited()
+
+
+async def test_critical_review_revision_requires_fresh_human_approval(
+    api_app: FastAPI,
+    test_client: httpx.AsyncClient,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    critical = ProviderResponse(
+        content=json.dumps(
+            {
+                "findings": [
+                    {
+                        "severity": "Critical",
+                        "dimension": "security_privacy",
+                        "finding_text": "Unverified policy",
+                        "location": "design.md",
+                        "recommendation": "Document the verification.",
+                    }
+                ]
+            }
+        ),
+        model="mock",
+        provider_id="ollama",
+    )
+    revised = ARTIFACTS.copy()
+    revised["design"] += "\n\nThe operator verifies the policy before approval."
+    provider = stub(generation_response())
+    provider.generate.side_effect = [
+        generation_response(),
+        critical,
+        generation_response(revised),
+        review_response(),
+    ]
+    api_app.state.ai_provider = provider
+    api_app.state.workflow_sessions = session_factory
+    created = await test_client.post(PREFIX, json={"title": "Feature", "description": "Draft."})
+    assert created.status_code == 201
+    request_id = created.json()["id"]
+    path = f"{PREFIX}/{request_id}"
+    assert (await test_client.post(path + "/generate")).status_code == 202
+    first = (await test_client.get(path + "/versions")).json()[0]
+    old_binding = {"version_id": first["id"], "content_digest": first["content_digest"]}
+    assert (await test_client.post(path + "/review")).status_code == 202
+    assert (await test_client.get(path)).json()["status"] == "revision_required"
+    denied = await test_client.post(path + "/approval", json=old_binding)
+    assert (denied.status_code, denied.json()["code"]) == (409, "INVALID_SPEC_TRANSITION")
+    historical = await test_client.get(path + "/review/findings")
+    assert historical.json()["summary"]["Critical"] == 1
+    updated = await test_client.patch(
+        path,
+        json={
+            "title": "Feature",
+            "description": "Verify policy before approval.",
+            "expected_version": 1,
+        },
+    )
+    assert updated.status_code == 200 and updated.json()["version"] == 2
+    assert (await test_client.post(path + "/generate")).status_code == 202
+    assert (await test_client.post(path + "/review")).status_code == 202
+    second = (await test_client.get(path + "/versions")).json()[-1]
+    assert second["id"] != first["id"] and second["content_digest"] != first["content_digest"]
+    assert (await test_client.post(path + "/approval", json=old_binding)).status_code == 409
+    binding = {"version_id": second["id"], "content_digest": second["content_digest"]}
+    approval = await test_client.post(path + "/approval", json=binding)
+    assert approval.status_code == 200
+    approval_id = approval.json()["id"]
+    stale = await test_client.post(
+        path + "/approve",
+        json={
+            **old_binding,
+            "approval_id": approval_id,
+            "decision": "approved",
+        },
+    )
+    assert stale.status_code == 409
+    async with session_factory() as session:
+        assert not await SpecificationApprovalService(session).is_implementation_authorized(
+            request_id
+        )
+    approved = await test_client.post(
+        path + "/approve",
+        json={
+            **binding,
+            "approval_id": approval_id,
+            "decision": "approved",
+        },
+    )
+    assert approved.status_code == 200
+    async with session_factory() as session:
+        repo = SpecificationVersionRepository(session)
+        assert await repo.artifact_contents(first["id"]) == ARTIFACTS
+        assert await repo.artifact_contents(second["id"]) == revised
+        assert await repo.verify_digest(first["id"])
+        assert await repo.verify_digest(second["id"])
+        assert await SpecificationApprovalService(session).is_implementation_authorized(request_id)
+    previous = await test_client.get(path + "/review/findings", params={"version_id": first["id"]})
+    assert previous.json() == historical.json()
+    events = (await test_client.get(path + "/audit")).json()
+    assert {"spec_revision_created", "spec_review_completed", "spec_approved"} <= {
+        event["event_type"] for event in events
+    }
+
+
+def test_workflow_template_rejects_standalone_specification_operation() -> None:
+    from pydantic import ValidationError
+
+    from devflow_api.schemas.workflow_template import WorkflowTemplate
+
+    step = {
+        "key": "spec",
+        "title": "Approve spec",
+        "version": 1,
+        "executor_id": "mock",
+        "tool_selection": {"executor_id": "mock"},
+        "approvable": True,
+        "protected_operation": "specification_approval",
+    }
+    document = {"template_version": 1, "steps": [step]}
+    assert WorkflowTemplate.model_validate(document).steps[0].protected_operation == (
+        "specification_approval"
+    )
+    step["protected_operation"] = "approve_specification"
+    with pytest.raises(ValidationError):
+        WorkflowTemplate.model_validate(document)

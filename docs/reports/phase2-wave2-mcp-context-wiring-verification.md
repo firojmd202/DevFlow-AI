@@ -1,9 +1,19 @@
 # DevFlow AI — Phase 2 Wave 2: MCP Context Wiring Verification
 
+## Verified correction — 2026-11-23
+
+The parent implementation at `a14bd7c` did not forward MCP selection. The HTTP request schema had no context field, the scheduled job received only the attempt ID, and the workflow generator supplied neither contexts nor an adapter. The earlier PASS verdict below is retained as historical and is superseded.
+
+The corrected HTTP route accepts a bounded `mcp_contexts` plan and schedules a deep copy bound to the newly created attempt ID. The registered workflow generator validates and copies the same contract from the workflow snapshot and supplies the executing run ID. Both construct the adapter from operator settings. The adapter authorizes canonical arguments before invoking the read-only tool and audits the outcome against the request and attempt. Direct HTTP and workflow tests exercised the real MCP 2.3.0 protocol over a fake subprocess. Required failure, optional failure, policy denial, no-context and duplicate submission were also verified. The frozen UI has no MCP selector.
+
+See the [final compliance report](phase2-wave2-final-compliance-verification.md) for the complete source trace and current test evidence.
+
+## Historical assessment, superseded
+
 **Branch:** `codex/phase2-wave2-group-d`
 **HEAD:** `a14bd7c`
 **Spec version:** v1.6.1
-**Assessment date:** 2026-11-24
+**Historical artifact commit date:** 2026-11-23 (Asia/Calcutta, `431b406`)
 **Assessor:** Automated workflow step — spec v1.6.1 finalization
 
 ---

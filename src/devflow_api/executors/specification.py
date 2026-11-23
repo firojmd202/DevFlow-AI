@@ -17,12 +17,14 @@ from devflow_api.schemas.executor import (
     StructuredError,
     TimeoutPolicy,
 )
+from devflow_api.schemas.specification import MCPContextRequest
 from devflow_api.schemas.workflow_template import ToolSelection
 from devflow_api.specification_errors import SpecificationError
 
 
 class GeneratorInput(ExecutorModel):
     spec_request_id: int = Field(gt=0, strict=True)
+    mcp_contexts: tuple[MCPContextRequest, ...] = Field(default=(), max_length=16)
 
 
 class ReviewerInput(ExecutorModel):

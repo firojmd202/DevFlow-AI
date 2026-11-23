@@ -28,6 +28,7 @@ from devflow_api.routers.specification_requests import router as specifications_
 from devflow_api.routers.workflows import router as workflows_router
 from devflow_api.services.recovery import RecoveryService
 from devflow_api.services.repository import GitHubOutcomeError
+from devflow_api.services.specification_recovery import SpecificationRecoveryService
 from devflow_core.config import Settings, get_settings
 from devflow_core.exceptions import ConfigurationError
 from devflow_core.logging import configure_logging
@@ -46,13 +47,22 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         try:
             async with app_engine.connect() as connection:
-                ready = await connection.run_sync(
-                    lambda sync: inspect(sync).has_table("workflow_step_runs")
-                )
-            if not ready:
+                tables = await connection.run_sync(lambda sync: inspect(sync).get_table_names())
+            if "workflow_step_runs" not in tables:
                 raise ConfigurationError("Apply Alembic migration 008 before starting the API")
+            if not {
+                "specification_requests",
+                "specification_versions",
+                "generation_attempts",
+                "review_attempts",
+                "specification_approval_requests",
+            }.issubset(tables):
+                raise ConfigurationError("Apply Alembic migration 009 before starting the API")
             async with sessions() as session:
                 app.state.recovered_steps = await RecoveryService(session, config).recover()
+                app.state.recovered_specifications = await SpecificationRecoveryService(
+                    session
+                ).recover()
             yield
         finally:
             await app_engine.dispose()

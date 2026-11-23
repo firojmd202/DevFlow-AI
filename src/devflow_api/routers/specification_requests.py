@@ -10,7 +10,6 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from devflow_api.adapters.mcp_adapter import MCPClientAdapter
-from devflow_api.adapters.mcp_client import MCPClient
 from devflow_api.models.audit import WorkflowAuditLog
 from devflow_api.models.specification import (
     GenerationAttempt,
@@ -27,6 +26,7 @@ from devflow_api.routers.workflows import ExecutionSettings, ResourceId, Session
 from devflow_api.schemas.specification import (
     AI_REVIEW_DISCLAIMER,
     ArtifactType,
+    MCPContextRequest,
     SpecificationRequestCreate,
 )
 from devflow_api.schemas.specification_http import (
@@ -37,6 +37,7 @@ from devflow_api.schemas.specification_http import (
     AttemptTrigger,
     CancelTaskResponse,
     FindingResponse,
+    GenerationTrigger,
     ProviderAvailability,
     ReviewFindingsResponse,
     SpecificationCreateBody,
@@ -50,6 +51,7 @@ from devflow_api.schemas.workflow import AuditLogEntry
 from devflow_api.services.specification_approval import SpecificationApprovalService
 from devflow_api.services.specification_attempts import ACTIVE, select_model
 from devflow_api.services.specification_generation import SpecificationGenerationService
+from devflow_api.services.specification_recovery import record_standalone_expiry
 from devflow_api.services.specification_review import SpecificationReviewService
 from devflow_api.services.workflow_projection import audit_payload
 from devflow_api.specification_errors import (
@@ -60,7 +62,6 @@ from devflow_api.specification_errors import (
 )
 from devflow_core.config import Settings
 from devflow_core.exceptions import ApprovalExpiredError
-from devflow_core.mcp_config import MCPServerConfig
 
 PREFIX = "/api/v1/specification-requests"
 router = APIRouter(prefix=PREFIX, tags=["specification requests"])
@@ -137,15 +138,12 @@ async def _run_generation(
     provider: AIProvider,
     config: Settings,
     attempt_id: int,
+    contexts: tuple[MCPContextRequest, ...],
 ) -> None:
     async with sessions() as audit_session:
-        mcp = MCPClientAdapter(
-            MCPClient(MCPServerConfig.from_settings(config), config),
-            AuditLogRepository(audit_session),
-            config,
-        )
+        mcp = MCPClientAdapter.from_settings(AuditLogRepository(audit_session), config)
         await SpecificationGenerationService(sessions, provider, settings=config, mcp=mcp).run(
-            attempt_id, actor_id=config.LOCAL_OPERATOR_ID
+            attempt_id, contexts, actor_id=config.LOCAL_OPERATOR_ID
         )
 
 
@@ -262,9 +260,10 @@ async def generate(
     tasks: BackgroundTasks,
     session: Session,
     config: ExecutionSettings,
-    body: AttemptTrigger | None = None,
+    body: GenerationTrigger | None = None,
 ) -> TaskResponse:
-    options = body or AttemptTrigger()
+    options = body or GenerationTrigger()
+    contexts = tuple(context.model_copy(deep=True) for context in options.mcp_contexts)
     row = await SpecificationVersionRepository(session).get_request(id)
     sessions, provider = _runtime(request)
     provider, config = _selection(provider, config, options.provider_id or row.provider_id)
@@ -274,7 +273,7 @@ async def generate(
         provider_id=options.provider_id or row.provider_id,
         model=options.model_id or row.model_id,
     )
-    tasks.add_task(_run_generation, sessions, provider, config, attempt.id)
+    tasks.add_task(_run_generation, sessions, provider, config, attempt.id, contexts)
     return TaskResponse(task_id=str(attempt.id), poll_url=f"{PREFIX}/{id}/status")
 
 
@@ -488,7 +487,8 @@ async def approve(
 ) -> ApprovalResponse:
     service = SpecificationApprovalService(session, config)
     row = await service.versions.get_request(id)
-    resolve = service.resolve_standalone if row.workflow_run_id is None else service.resolve_bound
+    standalone = row.workflow_run_id is None
+    resolve = service.resolve_standalone if standalone else service.resolve_bound
     try:
         version = await resolve(
             body.approval_id,
@@ -501,14 +501,19 @@ async def approve(
         )
     except ApprovalExpiredError:
         async with immediate_transaction(session):
-            current = await service.versions.get_request(id)
-            version = await _owned_version(service.versions, id, body.version_id)
-            await service.versions.audit(
-                "spec_approval_expired",
-                current,
-                version,
-                approval_id=body.approval_id,
-            )
+            if standalone:
+                await record_standalone_expiry(
+                    session, await service.standalone.get(body.approval_id)
+                )
+            else:
+                current = await service.versions.get_request(id)
+                version = await _owned_version(service.versions, id, body.version_id)
+                await service.versions.audit(
+                    "spec_approval_expired",
+                    current,
+                    version,
+                    approval_id=body.approval_id,
+                )
         raise
     return ApprovalResponse(id=body.approval_id, status=body.decision, version_id=version.id)
 

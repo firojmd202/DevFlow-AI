@@ -4,7 +4,7 @@
 **Status:** Final — PR-ready
 **Branch:** `feature/phase2-wave2-ai-spec-generation`
 **Base commit:** `b3b37ff` (Wave 1 implementation merged, develop HEAD)
-**Last Updated:** 2026-11-18
+**Last Updated:** 2026-11-23
 
 ---
 
@@ -15,7 +15,7 @@
 | `.kiro/specs/phase2-wave2-ai-specification-generation/requirements.md` | 1.6.0 | Final — PR-ready |
 | `.kiro/specs/phase2-wave2-ai-specification-generation/design.md` | 1.6.0 | Final — PR-ready |
 | `.kiro/specs/phase2-wave2-ai-specification-generation/tasks.md` | 1.6.0 | Final — PR-ready |
-| `docs/reports/phase2-wave2-mcp-compatibility-assessment.md` | 1.0.0 | Draft |
+| `docs/reports/phase2-wave2-mcp-compatibility-assessment.md` | 2.0.0 | MCP 2.3.0 verified |
 | `docs/planning/phase2-roadmap.md` | 2.2.0 | Updated (Wave 2 decisions recorded) |
 
 ---
@@ -28,7 +28,7 @@
 | `.kiro/specs/phase2-wave2-ai-specification-generation/design.md` | 1340 |
 | `.kiro/specs/phase2-wave2-ai-specification-generation/tasks.md` | 457 |
 | `docs/reports/phase2-wave2-spec-readiness.md` | (this file) |
-| `docs/reports/phase2-wave2-mcp-compatibility-assessment.md` | ~160 |
+| `docs/reports/phase2-wave2-mcp-compatibility-assessment.md` | 19 |
 | `docs/planning/phase2-roadmap.md` | (updated, Wave 2 section) |
 
 ---
@@ -73,16 +73,7 @@ Every requirement (REQ-W2.x.y) has numbered acceptance criteria. No requirement 
 
 ## 5. MCP Compatibility Verdict
 
-| Item | Value |
-|---|---|
-| SDK declared in `requirements/base.txt` | `mcp>=1.0,<2.0` |
-| Wave 2 target range | `mcp>=2.3.0,<3.0` |
-| **Verdict** | **UNKNOWN** |
-| Rationale | The declared and target ranges are mutually exclusive. 2.x API compatibility for the four used symbols (`ClientSession`, `SessionMessage`, `JSONRPCMessage`, `LoggingMessageNotificationParams`) cannot be confirmed from the codebase alone. Dependabot PR #20 must be evaluated separately. |
-| Adapter isolation | Strong: all `mcp.*` imports confined to `MCPClient`; no service imports `mcp.*` |
-| Action required | Evaluate PR #20; test `MCPClient` against `mcp>=2.3.0,<3.0` before Wave 2 implementation |
-
-See `docs/reports/phase2-wave2-mcp-compatibility-assessment.md` for full assessment.
+MCP 2.3.0 passes the Phase 1 transport and Wave 2 adapter tests. The transport validates the SDK JSON-RPC union with Pydantic TypeAdapter and the dependency declaration and both locks agree. Dependabot PR #20 only changes the declaration. [MCP assessment](phase2-wave2-mcp-compatibility-assessment.md)
 
 ---
 
@@ -106,8 +97,8 @@ Traceability table in `tasks.md` maps all 14 tasks (W2.T1–W2.T14) to their req
 - `is_implementation_authorized`: checks `SpecificationVersion.status = "approved"` + `verify_digest()` + (standalone only) `consumed_at IS NOT NULL`.
 
 ### Gate 4: SDK assumptions in W2.3 / MCPClientAdapter reference actual declared versions
-**Result: PASS (with caveat)**
-The `MCPClientAdapter` design (design §3.5, REQ-W2.3.6) explicitly references `mcp>=1.0,<2.0` as the currently declared SDK version and documents the target upgrade path (`mcp>=2.3.0,<3.0`) as pending PR #20 evaluation. No invented version numbers are used. The compatibility verdict is UNKNOWN (not COMPATIBLE), which accurately reflects uncertainty. The adapter isolation design ensures the SDK boundary is confined.
+**Result: PASS**
+The original 1.x declaration was the baseline at specification authoring. The Wave 2 implementation declares `mcp>=2.3.0,<3.0`, pins 2.3.0 and verifies the SDK boundary with the Phase 1 transport and Wave 2 adapter regressions.
 
 ### Gate 5: No real coding-agent execution introduced
 **Result: PASS**
@@ -136,18 +127,15 @@ No "TBD" items remain in `design.md`. All named sections are present: Architectu
 
 ### Gate 9: Cross-references consistent
 **Result: PASS**
-Cross-reference table in `requirements.md` maps all Wave 2 requirements that reuse Wave 1 requirements to their specific Wave 1 requirement IDs. Task traceability table in `tasks.md` maps all 12 tasks to requirements.
+The cross-reference table in `requirements.md` maps reused Wave 1 requirements to their IDs. The frozen `tasks.md` defines 14 tasks and includes a requirement traceability table.
 
 ---
 
+The nine checks above record specification acceptance. The implementation release gates, including any outstanding acceptance gaps, are recorded in the [Wave 2 final report](phase2-wave2-final-implementation-report.md).
+
 ## 7. Remaining Blockers
 
-| Blocker | Severity | Action Required |
-|---|---|---|
-| MCP SDK compatibility unconfirmed | Medium | Evaluate Dependabot PR #20; test `MCPClient` against `mcp>=2.3.0,<3.0` before Wave 2 implementation begins |
-| Wave 2 specs not yet reviewed by ChatGPT | Informational | Submit for review (this report is the submission artifact) |
-
-No blockers prevent spec review submission. The MCP blocker affects Wave 2 implementation start, not spec review.
+MCP 2.3.0 is verified for the locked version. The [final implementation report](phase2-wave2-final-implementation-report.md) records the release readiness decision and the open implementation acceptance gaps.
 
 ---
 
@@ -156,7 +144,7 @@ No blockers prevent spec review submission. The MCP blocker affects Wave 2 imple
 **Package contents:** This readiness report is part of a review archive. The full review package contains:
 - `.kiro/specs/phase2-wave2-ai-specification-generation/requirements.md` — 54 requirements across 9 areas; every requirement has numbered acceptance criteria.
 - `.kiro/specs/phase2-wave2-ai-specification-generation/design.md` — Architecture, 8 component specs, data models, migration schema, failure modes, security, async model, Wave 1 integration.
-- `.kiro/specs/phase2-wave2-ai-specification-generation/tasks.md` — 12 implementation tasks (W2.T1–W2.T12) with dependencies, acceptance criteria, sizing.
+- `.kiro/specs/phase2-wave2-ai-specification-generation/tasks.md` — 14 implementation tasks with dependencies, acceptance criteria and sizing.
 - `docs/reports/phase2-wave2-mcp-compatibility-assessment.md` — MCP SDK compatibility analysis.
 
 **Where to start:** Begin with `requirements.md` to understand the scope and constraints. Then `design.md` for the technical approach. Then `tasks.md` to verify implementation feasibility. Finally, compare the approval gate design (REQ-W2.7, design §3.9) against Wave 1 `ApprovalService` invariants for consistency.

@@ -77,9 +77,11 @@ class ReviewOutputSchema(BaseModel):
 
 
 class MCPContextRequest(BaseModel):
-    """Trusted service-side selection of a configured context tool."""
+    """Selection subject to the operator's configured MCP policy."""
 
-    server: str
-    tool: str
+    model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
+
+    server: str = Field(min_length=1, max_length=256)
+    tool: str = Field(min_length=1, max_length=256)
     arguments: dict[str, object] = Field(default_factory=dict)
     required: bool = False

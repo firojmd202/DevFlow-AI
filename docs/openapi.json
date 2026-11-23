@@ -458,6 +458,62 @@
         "title": "FindingResponse",
         "type": "object"
       },
+      "GenerationTrigger": {
+        "additionalProperties": false,
+        "properties": {
+          "expected_version": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expected Version"
+          },
+          "mcp_contexts": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/MCPContextRequest"
+            },
+            "maxItems": 16,
+            "title": "Mcp Contexts",
+            "type": "array"
+          },
+          "model_id": {
+            "anyOf": [
+              {
+                "maxLength": 256,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model Id"
+          },
+          "provider_id": {
+            "anyOf": [
+              {
+                "enum": [
+                  "ollama",
+                  "openai"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Provider Id"
+          }
+        },
+        "title": "GenerationTrigger",
+        "type": "object"
+      },
       "GitHubConfirmationRequest": {
         "properties": {
           "operation": {
@@ -697,6 +753,40 @@
           "id"
         ],
         "title": "LearningItemResponse",
+        "type": "object"
+      },
+      "MCPContextRequest": {
+        "additionalProperties": false,
+        "description": "Selection subject to the operator's configured MCP policy.",
+        "properties": {
+          "arguments": {
+            "additionalProperties": true,
+            "title": "Arguments",
+            "type": "object"
+          },
+          "required": {
+            "default": false,
+            "title": "Required",
+            "type": "boolean"
+          },
+          "server": {
+            "maxLength": 256,
+            "minLength": 1,
+            "title": "Server",
+            "type": "string"
+          },
+          "tool": {
+            "maxLength": 256,
+            "minLength": 1,
+            "title": "Tool",
+            "type": "string"
+          }
+        },
+        "required": [
+          "server",
+          "tool"
+        ],
+        "title": "MCPContextRequest",
         "type": "object"
       },
       "Nonempty": {
@@ -4715,7 +4805,7 @@
               "schema": {
                 "anyOf": [
                   {
-                    "$ref": "#/components/schemas/AttemptTrigger"
+                    "$ref": "#/components/schemas/GenerationTrigger"
                   },
                   {
                     "type": "null"

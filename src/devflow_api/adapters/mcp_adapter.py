@@ -23,6 +23,7 @@ from devflow_api.schemas.mcp import ContextChunk
 from devflow_core.config import Settings, get_settings
 from devflow_core.logging import get_logger
 from devflow_core.mcp_arguments import canonical_arguments
+from devflow_core.mcp_config import MCPServerConfig
 
 _MAX_ARGUMENT_BYTES = 64 * 1024
 _CONTROL_CHARACTERS = dict.fromkeys((set(range(32)) | set(range(127, 160))) - {9, 10})
@@ -45,6 +46,10 @@ class MCPClientAdapter:
     async def list_tools(self, server_name: str) -> tuple[str, ...]:
         return await self._client.list_tools(server_name)
 
+    @classmethod
+    def from_settings(cls, audit: AuditLogRepository, settings: Settings) -> "MCPClientAdapter":
+        return cls(MCPClient(MCPServerConfig.from_settings(settings), settings), audit, settings)
+
     async def retrieve_context(
         self,
         server_name: str,
@@ -54,6 +59,7 @@ class MCPClientAdapter:
         required: bool = True,
         specification_request_id: int | None = None,
         workflow_run_id: int | None = None,
+        generation_attempt_id: int | None = None,
     ) -> ContextChunk:
         status = "failed"
         argument_hash = None
@@ -134,6 +140,8 @@ class MCPClientAdapter:
             }
             if specification_request_id is not None:
                 payload["specification_request_id"] = specification_request_id
+            if generation_attempt_id is not None:
+                payload["generation_attempt_id"] = generation_attempt_id
             if workflow_run_id is None:
                 await self._audit.log_event("mcp_tool_invoked", "system", payload=payload)
             else:
