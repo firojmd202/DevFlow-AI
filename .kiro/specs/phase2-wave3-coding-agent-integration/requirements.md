@@ -1,7 +1,7 @@
 # DevFlow AI — Phase 2 Wave 3: Kiro Guided Handoff and Codex CLI Integration Requirements
 
-**Version:** 1.0.2
-**Status:** Frozen — v1.0.2 targeted integration corrections applied
+**Version:** 1.0.3
+**Status:** Frozen — v1.0.3 schema and lifecycle corrections applied
 **Scope:** Phase 2 Wave 3 — Kiro Guided Handoff and Codex CLI Integration
 **Branch:** `feature/phase2-wave3-coding-agent-integration`
 **Base commit:** `ee57dc7` (Wave 2 merged, develop HEAD)
@@ -17,6 +17,7 @@
 - v1.0.0 — 2026-11-23 — Initial Wave 3 specification.
 - v1.0.1 — 2026-11-23 — Revised following ChatGPT review. F01: manual added as first-class execution mode; blocked redefined as an outcome state. F02: authorization binding corrected against actual Wave 1 source; plan-level idempotency strategy replaced global hash uniqueness constraint. F03: report binding fields extended; empty/partial task result now blocks PASS. F04: WorkspaceValidator algorithm corrected; symlink detection fixed; UNC/device-path policy added; TOCTOU documented. F05: approval ordering corrected; Kiro verification precedes final spec approval. F06: durable wait design clarified; non-running human-wait state defined. F07: report_artifacts ownership fixed for pre-attempt Kiro phase; handoff_artifacts table introduced. F08: non-overridable finding categories defined; override limited to advisory findings. F09: Codex CLI capability claims corrected; abstract contract retained. F10: API endpoint list updated; counts corrected.
 - v1.0.2 — 2026-11-23 — Targeted integration corrections: (C1) execution mode enum reconciled to `manual|mock|real_when_isolated`; `blocked` removed from requested modes everywhere. (C2) immutable execution plan persistence: `baseline_commit`, `deadline_at` added; workflow ownership made non-null; crash-safe first transition specified; auth not consumed when real execution blocked. (C3) durable waiting contract source-verified against actual `StepExecutionResult` (`outcome="indeterminate"`); `WAITING_APPROVAL` step state confirmed; backward-compatible extension specified; wait reason, lease release, idempotent resumption, recovery, and duplicate-consumption prevention all specified. (C4) git metadata path validation added to WorkspaceValidator; bound reads, no config includes, `UNSUPPORTED_REPO_LAYOUT` error code defined. (C5) Kiro approval ordering enforced at `SpecificationApprovalService` backend; stale evidence invalidation rule added. (C6) artifact ownership: prompt lookup by `execution_plan_id` only; `content_hash` required; atomic publication; crash-safe recovery. (C7) version bumped to v1.0.2; counts updated.
+- v1.0.3 — 2026-11-23 — R01–R05 schema and lifecycle corrections: replacement plan partial index, durable waiting source-verification, publication state DDL alignment, artifact ownership enforcement, Wave 3 workflow discriminator.
 
 ---
 
@@ -392,6 +393,17 @@ REQ-W3.4.7.3 — The first manual prompt export, authorization consumption, dura
 REQ-W3.4.7.4 — Authorization MUST NOT be consumed for `real_when_isolated` mode when isolation prerequisites are unmet at execution time.
 REQ-W3.4.7.5 — Replacement plans (after input changes) require creating a new `execution_plans` row and requesting fresh authorization. The old plan's authorization is not transferable.
 
+### REQ-W3.4.8 — Replacement Execution Plans (R01)
+WHEN input fields change after an execution plan is created for a workflow step,
+THEN the system MUST support creating a replacement plan by atomically setting the old plan's status to `stale` and inserting a new plan row for the same `workflow_step_run_id`. At most one plan in an active status (`draft`, `ready`, `prompt_publishing`, `prompt_published`, `executing`) is permitted per `workflow_step_run_id` at any time, enforced by partial unique index. Historical and stale plans are retained as audit evidence.
+
+**Acceptance Criteria:**
+REQ-W3.4.8.1 — Creating a replacement plan atomically sets the old plan to `stale` in the same `BEGIN IMMEDIATE` transaction that inserts the new plan row.
+REQ-W3.4.8.2 — A `stale` plan's authorization cannot be consumed; CAS on `consumed_at IS NULL` prevents reuse.
+REQ-W3.4.8.3 — Fresh `implementation_authorization` approval is required for the new plan's `canonical_input_hash`; the stale plan's approval is not transferable.
+REQ-W3.4.8.4 — The partial unique index `uidx_execution_plans_active_step` prevents inserting a second active plan without first staling the existing one.
+REQ-W3.4.8.5 — Stale and completed plans for the same `workflow_step_run_id` are preserved and queryable as historical evidence.
+
 ---
 
 ## Area W3.5 — Workspace and Artifact Management
@@ -556,6 +568,17 @@ REQ-W3.7.3.3 — `awaiting_impl_report` execution attempts survive restart and a
 REQ-W3.7.3.4 — The wait reason is stored as a discriminated field distinguishing `waiting_for_kiro_report` from `waiting_for_impl_authorization`; the two states cannot be confused by the resumption logic.
 REQ-W3.7.3.5 — Resumption after restart re-reads attempt status from the database; already-resumed attempts are not re-dispatched.
 REQ-W3.7.3.6 — `real_when_isolated` NEVER auto-dispatches even after isolation prerequisites might theoretically become available; the user must explicitly request a new attempt.
+
+### REQ-W3.7.6 — Durable Wait Mechanism Contract (R02)
+WHEN a Kiro handoff enters `awaiting_report` state,
+THEN the system MUST enforce: (a) the step lease is released before human-wait begins — `KiroHandoffExecutor.execute()` returns `outcome="indeterminate"` with `error.code="WAITING_FOR_KIRO_REPORT"` and does not hold an active coroutine; (b) `generation_attempt_id` or equivalent is stored with the wait token and resumption validates the token matches the current attempt; (c) the atomic transition into wait state uses a single `BEGIN IMMEDIATE` transaction to set attempt status and record the wait token; (d) on restart, re-reading attempt status prevents re-dispatch of already-resumed attempts; (e) on expiry, `handoff_records.expires_at` threshold is used and expired attempts are set to `failed` with `error_code=HANDOFF_EXPIRED`; (f) report-waiting MUST NOT create an `ApprovalRequest` or `SpecificationApprovalRequest` row — it is a distinct waiting mechanism orthogonal to the approval gate.
+
+**Acceptance Criteria:**
+REQ-W3.7.6.1 — Wait reason is persisted in the domain record (`handoff_records.status`) and is distinguishable from approval-waiting by `error.code` on the `StepExecutionResult`.
+REQ-W3.7.6.2 — The step lease is released before the handoff enters `awaiting_report`; no active coroutine holds the step.
+REQ-W3.7.6.3 — Recovery (`CodingAgentRecoveryService.recover()`) does not re-dispatch `awaiting_report` or `awaiting_impl_report` attempts.
+REQ-W3.7.6.4 — No `ApprovalRequest` row is created for report-waiting; only the `implementation_authorization` gate creates `ApprovalRequest` rows.
+REQ-W3.7.6.5 — Idempotent resumption: a second attempt to resume an already-resumed attempt returns the current status without re-dispatching.
 
 ### REQ-W3.7.4 — Recovery on Restart
 WHEN the application starts,

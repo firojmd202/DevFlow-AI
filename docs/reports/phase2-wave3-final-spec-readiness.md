@@ -1,21 +1,33 @@
 # DevFlow AI — Phase 2 Wave 3 Final Specification Readiness Report
 
-**Version:** 1.0.2 (Final)
+**Version:** 1.0.3 (Final)
 **Branch:** `feature/phase2-wave3-coding-agent-integration`
 **Date:** 2026-11-23
 **Supersedes:** `phase2-wave3-spec-readiness.md` (v1.0.1)
 
 ---
 
+## R01–R05 Corrections (v1.0.3)
+
+| Finding | Description | Status |
+|---|---|---|
+| R01 | Replacement execution plans — partial unique index | RESOLVED |
+| R02 | Durable human waiting — source-verified, no fake approvals | RESOLVED |
+| R03 | Publication states in CHECK constraint | RESOLVED |
+| R04 | Artifact ownership CHECKs + unique index | RESOLVED |
+| R05 | Wave 3 workflow discriminator table | RESOLVED |
+
+---
+
 ## 1. Final Version
 
-Specification v1.0.2 is the frozen version of the Wave 3 specification. All targeted integration corrections (C1–C7) have been applied.
+Specification v1.0.3 is the frozen version of the Wave 3 specification. All targeted integration corrections (C1–C7) and R01–R05 schema/lifecycle corrections have been applied.
 
 | File | Version |
 |---|---|
-| `requirements.md` | 1.0.2 |
-| `design.md` | 1.0.2 |
-| `tasks.md` | 1.0.2 |
+| `requirements.md` | 1.0.3 |
+| `design.md` | 1.0.3 |
+| `tasks.md` | 1.0.3 |
 
 ---
 

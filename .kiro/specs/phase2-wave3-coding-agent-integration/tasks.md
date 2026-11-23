@@ -1,12 +1,12 @@
 # DevFlow AI — Phase 2 Wave 3: Kiro Guided Handoff and Codex CLI Integration Tasks
 
-**Version:** 1.0.2
-**Status:** Frozen — v1.0.2 targeted integration corrections applied
+**Version:** 1.0.3
+**Status:** Frozen — v1.0.3 schema and lifecycle corrections applied
 **Scope:** Phase 2 Wave 3 — Kiro Guided Handoff and Codex CLI Integration
 **Branch:** `feature/phase2-wave3-coding-agent-integration`
 **Base commit:** `ee57dc7` (Wave 2 merged, develop HEAD)
 **Last Updated:** 2026-11-23
-**Companions:** `requirements.md` (v1.0.2), `design.md` (v1.0.2).
+**Companions:** `requirements.md` (v1.0.3), `design.md` (v1.0.3).
 
 ---
 
@@ -15,6 +15,7 @@
 - v1.0.0 — 2026-11-23 — Initial Wave 3 tasks.
 - v1.0.1 — 2026-11-23 — ChatGPT review corrections F01–F10 applied.
 - v1.0.2 — 2026-11-23 — Targeted integration corrections: execution mode enum updated to `manual|mock|real_when_isolated` in all acceptance criteria; `execution_plans` table AC updated for `baseline_commit`, `deadline_at`, NOT NULL FKs; durable waiting contract AC updated citing `outcome="indeterminate"`; git metadata path validation AC added; Kiro approval ordering AC added; artifact ownership AC updated for `execution_plan_id` and `content_hash`.
+- v1.0.3 — 2026-11-23 — R01–R05 schema and lifecycle corrections applied.
 
 ---
 
@@ -268,8 +269,12 @@ W3.T6.10 — `execution_plans` contains `baseline_commit TEXT NOT NULL` and `dea
 W3.T6.11 — `execution_plans.execution_mode` CHECK constraint is `IN ('manual','mock','real_when_isolated')` — no `'blocked'` value.
 W3.T6.12 — `handoff_artifacts.execution_plan_id` FK column present (NULL for kiro_prompt/kiro_report; NOT NULL for codex_prompt artifacts enforced at service layer).
 W3.T6.13 — `handoff_artifacts.content_hash TEXT NOT NULL` present.
+W3.T6.14 — The partial unique index `uidx_execution_plans_active_step` prevents concurrent active plans for the same workflow step.
+W3.T6.15 — `execution_plans` CHECK constraint includes publication states: `prompt_publishing`, `prompt_published`, `executing`, `completed`, `failed`, `stale`.
+W3.T6.16 — `handoff_artifacts` has conditional CHECK constraints enforcing `codex_prompt` requires `execution_plan_id`; kiro artifacts forbid it.
+W3.T6.17 — `workflow_wave3_capabilities` table created with `UNIQUE INDEX uidx_wave3_caps_per_run` on `workflow_run_id`.
 
-**Definition of Done:** All 13 AC pass. Migration 010 is new Alembic head.
+**Definition of Done:** All 17 AC pass. Migration 010 is new Alembic head.
 
 **Estimated Complexity:** Medium
 
@@ -303,8 +308,10 @@ W3.T7.11 — `execution_plans` rows are created with `workflow_run_id NOT NULL` 
 W3.T7.12 — `baseline_commit` and `deadline_at` are persisted in `execution_plans` before `request_bound_approval` is called.
 W3.T7.13 — Specification approval for a Wave 3 workflow-linked spec without a validated Kiro handoff matching the current content digest is rejected with `KIRO_VERIFICATION_REQUIRED`.
 W3.T7.14 — Prompt artifact lookup uses `execution_plan_id` FK; a lookup by `handoff_id` alone without plan ID is rejected at service layer.
+W3.T7.15 — Replacement plan creation atomically sets old plan to `stale` and inserts new plan in one `BEGIN IMMEDIATE` transaction.
+W3.T7.16 — Prompt publication is crash-safe: `prompt_publishing` intermediate state is recovered on restart without re-consuming authorization.
 
-**Definition of Done:** All 14 AC pass. No new approval table introduced; Wave 1 `ApprovalService` only.
+**Definition of Done:** All 16 AC pass. No new approval table introduced; Wave 1 `ApprovalService` only.
 
 **Estimated Complexity:** Medium
 
@@ -384,8 +391,10 @@ W3.T10.3 — Orchestrator dispatches `executor_id = "codex_cli"` to `CodexCLIExe
 W3.T10.4 — Recovery transitions `dispatching`/`mock_execution` → `interrupted`.
 W3.T10.5 — Recovery does NOT interrupt `awaiting_impl_report` or `awaiting_report`.
 W3.T10.6 — Existing executors unaffected.
+W3.T10.7 — Durable wait states (`awaiting_report`, `awaiting_impl_report`) are preserved across restart; no automatic redispatch.
+W3.T10.8 — Wave 3 workflow run creation inserts a `workflow_wave3_capabilities` row before any Wave 3 executor steps execute.
 
-**Definition of Done:** All 6 AC pass. Wave 1/Wave 2 orchestrator tests pass.
+**Definition of Done:** All 8 AC pass. Wave 1/Wave 2 orchestrator tests pass.
 
 **Estimated Complexity:** Medium
 

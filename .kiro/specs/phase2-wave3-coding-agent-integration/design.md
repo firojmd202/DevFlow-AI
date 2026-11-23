@@ -1,12 +1,12 @@
 # DevFlow AI — Phase 2 Wave 3: Kiro Guided Handoff and Codex CLI Integration Design
 
-**Version:** 1.0.2
-**Status:** Frozen — v1.0.2 targeted integration corrections applied
+**Version:** 1.0.3
+**Status:** Frozen — v1.0.3 schema and lifecycle corrections applied
 **Scope:** Phase 2 Wave 3 — Kiro Guided Handoff and Codex CLI Integration
 **Branch:** `feature/phase2-wave3-coding-agent-integration`
 **Base commit:** `ee57dc7` (Wave 2 merged, develop HEAD)
 **Last Updated:** 2026-11-23
-**Companion:** `requirements.md` (v1.0.2), `tasks.md` (v1.0.2).
+**Companion:** `requirements.md` (v1.0.3), `tasks.md` (v1.0.3).
 
 ---
 
@@ -21,6 +21,7 @@ Wave 3 extends Wave 1 and Wave 2 additively. All existing contracts are preserve
 - v1.0.0 — 2026-11-23 — Initial Wave 3 design.
 - v1.0.1 — 2026-11-23 — ChatGPT review corrections F01–F10 applied.
 - v1.0.2 — 2026-11-23 — Targeted integration corrections: (C1) execution mode enum reconciled `manual|mock|real_when_isolated`; `blocked` removed from all typed contracts and DB constraints. (C2) immutable plan persistence: `baseline_commit` and `deadline_at` added to `execution_plans`; workflow FKs made NOT NULL; crash-safe first transition documented. (C3) durable waiting contract source-verified against actual `StepExecutionResult` (`outcome="indeterminate"`); `WAITING_APPROVAL` confirmed; full durable-wait specification added to §3.2.1. (C4) git metadata path validation subsection §6.3 added with boundary checks, bound reads, no config includes, no alternates, `UNSUPPORTED_REPO_LAYOUT` for submodules/worktrees. (C5) Kiro approval ordering enforcement at `SpecificationApprovalService` §8.5 added. (C6) artifact ownership: `execution_plan_id` FK added to `handoff_artifacts`; content immutability, atomic publication, crash-safe recovery documented. (C7) version bumped to v1.0.2.
+- v1.0.3 — 2026-11-23 — R01–R05 schema and lifecycle corrections: replacement plan partial index, durable waiting source-verification, publication state DDL alignment, artifact ownership enforcement, Wave 3 workflow discriminator.
 
 ---
 
@@ -151,6 +152,10 @@ class StepExecutionResult(ExecutorModel):
 
 These two wait states are always distinguishable by reading `handoff_records.status` and `execution_attempts.status`; no logic can confuse them.
 
+**No fake approval requests:** Report-waiting (Kiro handoff in `awaiting_report`) MUST NOT create an `ApprovalRequest` or `SpecificationApprovalRequest` row. Report-waiting is a distinct waiting mechanism tracked exclusively in `handoff_records`. Only the `implementation_authorization` gate (a separate step) uses `ApprovalRequest` rows. The two mechanisms are orthogonal and must not be conflated.
+
+**Legacy preservation:** The `WAITING_APPROVAL` step state remains available for Wave 1/Wave 2 approval gates without modification. Wave 3 reuses this same step state for its durable waits; Wave 1/Wave 2 behavior is unaffected because the sub-state detail is in domain records (`handoff_records`, `execution_attempts`), not in `WorkflowStepRun`.
+
 **Ownership:** The wait token is owned by the `handoff_records` row (for Kiro waits) or the `execution_attempts` row (for impl-auth waits). The `WorkflowStepRun` holds only the step-level `WAITING_APPROVAL` state; the sub-state detail is in the domain record.
 
 **Atomic transition into wait state:**
@@ -166,7 +171,7 @@ These two wait states are always distinguishable by reading `handoff_records.sta
 - Resumption after restart re-reads attempt status from the database. An already-resumed attempt (status ≠ `awaiting_report` or `awaiting_impl_report`) is not re-dispatched. The recovery service leaves durable wait states untouched.
 
 **Cancellation and expiry:**
-- `awaiting_report` → `expired` via TTL check in `CodingAgentRecoveryService` (emits audit event).
+- `awaiting_report` → `expired` via TTL check in `CodingAgentRecoveryService` (emits audit event). `handoff_records.expires_at` or the computed `awaiting_since + KIRO_HANDOFF_EXPIRY_SECONDS` threshold is used; on expiry the attempt status is set to `failed` with `error_code=HANDOFF_EXPIRED`.
 - `awaiting_report` → `cancelled` via explicit user action (emits audit event).
 - `awaiting_impl_report` → `cancelled` via explicit user action; authorization record reflects cancellation (not consumed).
 - Both transitions are CAS on current state within `BEGIN IMMEDIATE` transaction.
@@ -703,6 +708,42 @@ This check is enforced in the `_eligible()` method of `SpecificationApprovalServ
 
 ---
 
+### 8.6 Wave 3 Workflow Capability Discriminator (R05)
+
+Using `implementation_authorization` alone as a Wave 3 discriminator is ambiguous because this operation already exists in Wave 1 workflows. An explicit persisted trusted discriminator is required.
+
+#### Schema additions (migration 010)
+
+```sql
+-- New column on workflow_step_templates (additive, backward-compatible)
+-- Default 0 preserves Wave 1/2 behavior: existing templates are not Wave 3 capable.
+ALTER TABLE workflow_step_templates
+  ADD COLUMN wave3_capable INTEGER NOT NULL DEFAULT 0
+    CHECK (wave3_capable IN (0, 1));
+
+-- New table: immutable per-run snapshot of Wave 3 capabilities
+CREATE TABLE workflow_wave3_capabilities (
+  id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+  workflow_run_id       INTEGER NOT NULL REFERENCES workflow_runs(id) ON DELETE CASCADE,
+  capabilities_snapshot TEXT NOT NULL,  -- JSON snapshot of enabled Wave 3 features
+  spec_version          TEXT NOT NULL,  -- e.g. '1.0.3'
+  created_at            DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE UNIQUE INDEX uidx_wave3_caps_per_run
+  ON workflow_wave3_capabilities(workflow_run_id);
+```
+
+#### Semantics
+
+- `wave3_capable = 1` on a `workflow_step_templates` row indicates the step uses Wave 3 executor contracts (`KiroHandoffExecutor`, `CodexCLIExecutor`).
+- `wave3_capable = 0` (default) on all existing Wave 1/2 templates: backward compatibility preserved; those templates are unaffected by Wave 3 rules.
+- A `workflow_wave3_capabilities` row is created immutably when a Wave 3 workflow run starts, before any Wave 3 executor steps execute. It snapshots the enabled features and spec version at run-creation time.
+- The `SpecificationApprovalService` checks for a valid `workflow_wave3_capabilities` row for the current `workflow_run_id` before applying Wave 3 approval ordering rules (Kiro verification required). Absence of this row means Wave 3 rules do not apply.
+- Legacy Wave 1/2 workflow runs have no `workflow_wave3_capabilities` row → Wave 3 ordering rules do NOT apply → backward compatibility preserved.
+- `kiro_verification_id` on `specification_versions` is added in migration 010 as a nullable FK to `kiro_handoffs(id)` ON DELETE SET NULL. It records the validated handoff for the version and is set to NULL on each new version creation (REQ-W3.2.10).
+
+---
+
 ## 9. Execution Lifecycle State Machines
 
 ### 9.1 Handoff State Machine (handoff_records)
@@ -843,25 +884,40 @@ CREATE TABLE handoff_artifacts (
     storage_key TEXT NOT NULL,          -- DevFlow-generated safe identifier; never client-supplied
     status TEXT NOT NULL DEFAULT 'draft'
         CHECK (status IN ('draft','prompt_publishing','published')),  -- for codex_prompt; kiro artifacts go directly to 'published'
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    -- R04 ownership enforcement
+    CHECK (artifact_type != 'codex_prompt' OR execution_plan_id IS NOT NULL),
+    CHECK (artifact_type IN ('codex_prompt') OR execution_plan_id IS NULL)
 );
 CREATE INDEX idx_ha_handoff ON handoff_artifacts(handoff_record_id);
 CREATE INDEX idx_ha_plan ON handoff_artifacts(execution_plan_id);
 CREATE INDEX idx_ha_hash ON handoff_artifacts(content_hash);
 CREATE INDEX idx_ha_type ON handoff_artifacts(artifact_type);
+-- R04: at most one immutable codex prompt per execution plan
+CREATE UNIQUE INDEX uidx_codex_prompt_per_plan
+  ON handoff_artifacts(execution_plan_id)
+  WHERE artifact_type = 'codex_prompt' AND execution_plan_id IS NOT NULL;
 ```
 
-> **Artifact ownership rules:**
+> **Artifact ownership rules (R04):**
 >
 > - Each exported Codex prompt artifact (`artifact_type = 'codex_prompt'`) belongs to exactly one `execution_plans` row via `execution_plan_id FK NOT NULL`. Lookup by `handoff_record_id` alone is prohibited for `codex_prompt` artifacts; lookup MUST include `execution_plan_id`.
 > - A `handoff_records` row may be referenced by multiple independently authorized `execution_plans` rows, but each plan has its own `codex_prompt` artifact.
 > - `kiro_prompt` and `kiro_report` artifacts belong to the handoff only (`execution_plan_id = NULL`).
+> - These ownership rules are enforced by conditional CHECK constraints in the DDL:
+>   - `CHECK (artifact_type != 'codex_prompt' OR execution_plan_id IS NOT NULL)` — codex prompts must have a plan.
+>   - `CHECK (artifact_type IN ('codex_prompt') OR execution_plan_id IS NULL)` — kiro artifacts must not have a plan.
+>   - `CREATE UNIQUE INDEX uidx_codex_prompt_per_plan ON handoff_artifacts(execution_plan_id) WHERE artifact_type = 'codex_prompt' AND execution_plan_id IS NOT NULL` — at most one immutable codex prompt per plan.
+> - The same-handoff constraint (execution_plan.kiro_handoff_id MUST equal artifact.handoff_id for codex_prompt artifacts) is enforced transactionally in `ExecutionPlanService.publish_prompt()` because SQLite CHECK constraints cannot reference other tables.
 >
 > **Immutable content:**
 > - Prompt content is stored immutably: once `status = 'published'`, the `content` and `content_hash` are never overwritten. Any re-read returns the stored content.
 >
-> **Atomic publication:**
-> - Publication is atomic: a single `BEGIN IMMEDIATE` transaction sets `execution_plans.status = 'prompt_published'` and either inserts the artifact row (first export) or verifies the existing row matches (idempotent re-export).
+> **Atomic publication (R03 — crash-safe two-step):**
+> - Step 1 (atomic): set `execution_plans.status = 'prompt_publishing'` in a `BEGIN IMMEDIATE` transaction. Authorization is consumed via CAS on `consumed_at IS NULL` BEFORE this step; if the plan is later recovered, re-publication proceeds without re-consuming.
+> - Step 2 (atomic): store prompt artifact content; set `execution_plans.status = 'prompt_published'` and insert the `handoff_artifacts` row (or verify existing row matches) in a single `BEGIN IMMEDIATE` transaction.
+> - Recovery: on restart, any `execution_plans` row with `status = 'prompt_publishing'` re-executes Step 2 using the same deterministic inputs (content regenerated from the immutable execution plan — same inputs always produce same content). This is idempotent because the content hash is verified before storing.
+> - The two-step transition (`prompt_publishing` → `prompt_published`) is a crash-recovery state. Both values MUST be valid CHECK constraint members in the `execution_plans.status` column.
 >
 > **Crash-safe recovery:**
 > - On restart, any `execution_plans` row with `status = 'prompt_publishing'` (intermediate state from an interrupted publication) is recovered by re-publishing the prompt. This is idempotent because the content hash is deterministic from the immutable execution input fields.
@@ -907,13 +963,17 @@ CREATE TABLE execution_plans (
         CHECK (execution_mode IN ('manual','mock','real_when_isolated')),  -- requested mode only; 'blocked' is an outcome state
     canonical_execution_input_hash TEXT NOT NULL,  -- not globally unique; scoped by step
     status TEXT NOT NULL DEFAULT 'draft'
-        CHECK (status IN ('draft','authorized','consumed','cancelled','stale')),
+        CHECK (status IN ('draft','ready','prompt_publishing','prompt_published','executing','completed','failed','cancelled','stale')),
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
-    UNIQUE (workflow_run_id, workflow_step_run_id)  -- one active plan per step
+    UNIQUE (workflow_run_id, workflow_step_run_id)  -- one plan per step (any status; see partial index below)
 );
 CREATE INDEX idx_ep_handoff ON execution_plans(handoff_record_id);
 CREATE INDEX idx_ep_hash ON execution_plans(canonical_execution_input_hash);
+-- Only one ACTIVE plan per workflow step at a time (R01)
+CREATE UNIQUE INDEX uidx_execution_plans_active_step
+  ON execution_plans(workflow_step_run_id)
+  WHERE status IN ('draft', 'ready', 'prompt_publishing', 'prompt_published', 'executing');
 ```
 
 > **Immutable plan persistence requirement:** The complete immutable execution plan — including `baseline_commit`, `deadline_at`, and `canonical_execution_input_hash` — MUST be persisted in a single atomic transaction before `implementation_authorization` is requested. Authorization input reconstruction from mutable client data is prohibited.
@@ -925,6 +985,27 @@ CREATE INDEX idx_ep_hash ON execution_plans(canonical_execution_input_hash);
 > **Crash-safe first transition:** The first manual prompt export, authorization consumption, durable prompt publication, and execution-attempt state transition MUST be crash-safe: a single `BEGIN IMMEDIATE` transaction spans the plan status update and attempt creation.
 >
 > **Authorization consumption guard:** Authorization MUST NOT be consumed for `real_when_isolated` mode when isolation prerequisites are unmet at execution time. The `IsolationGate` check runs before `dispatch_protected_txn`.
+
+#### Replacement Execution Plans (R01)
+
+The partial unique index `uidx_execution_plans_active_step` enforces that at most one plan per `workflow_step_run_id` may hold an active status at any time. Historical and stale plans are permitted alongside the active plan.
+
+**Active statuses** (block a new plan): `draft`, `ready`, `prompt_publishing`, `prompt_published`, `executing`.
+
+**Historical statuses** (allow a new plan): `completed`, `failed`, `cancelled`, `stale`.
+
+**Replacement procedure:**
+1. Within a single `BEGIN IMMEDIATE` transaction: set the old plan's `status = 'stale'`.
+2. Insert the new plan row with status `draft`.
+3. Request fresh `implementation_authorization` for the new plan. The old plan's authorization is NOT transferable.
+
+**Ownership validation:** The new plan MUST reference the same `workflow_run_id` and `workflow_step_run_id` as the stale plan. Cross-step or cross-run replacement is not permitted.
+
+**Authorization freshness:** A fresh `implementation_authorization` approval MUST be obtained for the new plan's `canonical_input_hash`. The stale plan's approval cannot be reused: its `consumed_at` CAS prevents reuse.
+
+**Authorization non-transferability:** The old plan's `implementation_authorization` approval is NOT transferable. Its `consumed_at` is left as-is (unconsumed if not yet consumed, consumed if already consumed). A fresh approval request is always required for the new `canonical_input_hash`.
+
+**Duplicate prevention:** The partial unique index `uidx_execution_plans_active_step` enforces that at most one active plan exists per step at any time. The step transition to `stale` and the new plan insertion are atomic, preventing race conditions.
 
 #### execution_attempts
 
@@ -1001,7 +1082,27 @@ CREATE TABLE capability_records (
 );
 ```
 
-**Table count:** 7 new tables (handoff_records, handoff_artifacts, handoff_findings, execution_plans, execution_attempts, execution_artifacts, capability_records). Migration 010 is fully reversible; downgrade drops all 7 tables in reverse dependency order.
+**Table count:** 7 new tables (handoff_records, handoff_artifacts, handoff_findings, execution_plans, execution_attempts, execution_artifacts, capability_records) plus 1 new Wave 3 discriminator table (`workflow_wave3_capabilities`) and 1 new column on `workflow_step_templates` (`wave3_capable`). Migration 010 is fully reversible; downgrade drops all Wave 3 tables in reverse dependency order and removes the `wave3_capable` column.
+
+#### workflow_wave3_capabilities (R05)
+
+```sql
+-- New table: immutable per-run snapshot of Wave 3 capabilities (R05)
+CREATE TABLE workflow_wave3_capabilities (
+  id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+  workflow_run_id       INTEGER NOT NULL REFERENCES workflow_runs(id) ON DELETE CASCADE,
+  capabilities_snapshot TEXT NOT NULL,  -- JSON snapshot of enabled Wave 3 features
+  spec_version          TEXT NOT NULL,  -- e.g. '1.0.3'
+  created_at            DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE UNIQUE INDEX uidx_wave3_caps_per_run
+  ON workflow_wave3_capabilities(workflow_run_id);
+
+-- New column on workflow_step_templates (R05, additive)
+ALTER TABLE workflow_step_templates
+  ADD COLUMN wave3_capable INTEGER NOT NULL DEFAULT 0
+    CHECK (wave3_capable IN (0, 1));
+```
 
 ---
 
