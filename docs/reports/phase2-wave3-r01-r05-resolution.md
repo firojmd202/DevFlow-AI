@@ -1,5 +1,19 @@
 # Phase 2 Wave 3 — R01–R05 Resolution Matrix
 
+## v1.0.4 executable verification — 2026-11-24
+
+| Finding | Current result |
+|---|---|
+| R01 | Reproduced the v1.0.3 replacement failure. Executed the corrected partial index and composite FK on migration 009 fixtures. History, independent steps and fresh binding passed. |
+| R02 | Current `indeterminate` persists failure. v1.0.4 specifies a new typed report wait, distinct from approval. Existing orchestrator and recovery characterization passed, and proposed wait DDL and downgrade passed in SQLite. |
+| R03 | A single proposed transaction owns consumption, durable exact prompt bytes, attempt, wait and audit. The SQLite probe verified rollback of consumption, intent, attempt and audit and preserved exact bytes on commit. |
+| R04 | SQL rejected cross-handoff ownership, invalid artifact kinds, missing hashes, duplicate prompt and mutation of the published hash. |
+| R05 | Verified real 009 FK targets, the corrected `handoff_records` link, immutable capability snapshot and populated round-trip. The nonexistent template table was removed from the design. |
+
+This supersedes the v1.0.3 assessment below. The new lifecycle and migration remain implementation tasks. [Full DDL and evidence](phase2-wave3-final-technical-verification.md)
+
+## Historical v1.0.3 assessment _(Historical — superseded by v1.0.4 technical verification)_
+
 **Spec version:** v1.0.3
 **Date:** 2026-11-23
 **Branch:** feature/phase2-wave3-coding-agent-integration
