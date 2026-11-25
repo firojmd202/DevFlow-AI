@@ -129,7 +129,8 @@ CREATE TABLE handoff_records (
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     CHECK (workflow_step_run_id IS NULL OR workflow_run_id IS NOT NULL),
-    FOREIGN KEY (workflow_run_id, workflow_step_run_id) REFERENCES workflow_step_runs(workflow_run_id, id)
+    FOREIGN KEY (workflow_run_id, workflow_step_run_id)
+        REFERENCES workflow_step_runs(workflow_run_id, id)
 );
 CREATE INDEX idx_hr_spec_version ON handoff_records(specification_version_id);
 CREATE INDEX idx_hr_status ON handoff_records(status);
@@ -354,7 +355,12 @@ def failed(msg: str) -> None:
     print(f"  FAIL  {msg}", file=sys.stderr)
 
 
-def assert_rejected(db: sqlite3.Connection, sql: str, params: tuple = (), fragment: str = "") -> None:
+def assert_rejected(
+    db: sqlite3.Connection,
+    sql: str,
+    params: tuple = (),
+    fragment: str = "",
+) -> None:
     """Assert that executing sql raises IntegrityError containing fragment."""
     try:
         db.execute(sql, params)
@@ -380,12 +386,15 @@ def assert_ok(db: sqlite3.Connection, sql: str, params: tuple = (), msg: str = "
 # Seed helpers
 # ---------------------------------------------------------------------------
 
+
 def seed_legacy(db: sqlite3.Connection) -> None:
     db.execute(
-        "INSERT INTO workflows(id,name,created_at,updated_at) VALUES (1,'w1','2024-01-01','2024-01-01')"
+        "INSERT INTO workflows(id,name,created_at,updated_at) "
+        "VALUES (1,'w1','2024-01-01','2024-01-01')"
     )
     db.execute(
-        "INSERT INTO workflow_runs(id,workflow_id,created_at,updated_at) VALUES (1,1,'2024-01-01','2024-01-01')"
+        "INSERT INTO workflow_runs(id,workflow_id,created_at,updated_at) "
+        "VALUES (1,1,'2024-01-01','2024-01-01')"
     )
     db.execute(
         "INSERT INTO workflow_step_runs(id,workflow_run_id,step_key,step_version,executor_id,"
@@ -441,6 +450,7 @@ CONSUME_SQL = (
 # Test suite
 # ---------------------------------------------------------------------------
 
+
 def run_tests() -> None:
     print("Wave 3 DDL verification")
     print("=" * 60)
@@ -490,8 +500,7 @@ def run_tests() -> None:
         db.execute(PLAN_SQL, (1, "hash1", "draft"))
         passed("first active plan accepted")
 
-        assert_rejected(db, PLAN_SQL, (2, "hash2", "draft"),
-                        "execution_plans.workflow_step_run_id")
+        assert_rejected(db, PLAN_SQL, (2, "hash2", "draft"), "execution_plans.workflow_step_run_id")
 
         db.execute("UPDATE execution_plans SET status='stale' WHERE id=1")
         passed("plan 1 set to stale")
@@ -535,9 +544,9 @@ def run_tests() -> None:
             failed("replay consumption should return 0 rows")
 
         db.rollback()
-        consumed_at = db.execute(
-            "SELECT consumed_at FROM approval_requests WHERE id=1"
-        ).fetchone()[0]
+        consumed_at = db.execute("SELECT consumed_at FROM approval_requests WHERE id=1").fetchone()[
+            0
+        ]
         if consumed_at is None:
             passed("rollback restored consumed_at to NULL")
         else:
@@ -547,9 +556,9 @@ def run_tests() -> None:
         db.execute(AUTH_SQL, (2, "hash2b"))
         db.execute(CONSUME_SQL, (2, "hash2b"))
         db.commit()
-        consumed_at = db.execute(
-            "SELECT consumed_at FROM approval_requests WHERE id=2"
-        ).fetchone()[0]
+        consumed_at = db.execute("SELECT consumed_at FROM approval_requests WHERE id=2").fetchone()[
+            0
+        ]
         if consumed_at is not None:
             passed("commit path persists consumed_at")
         else:
@@ -567,7 +576,8 @@ def run_tests() -> None:
             "INSERT INTO handoff_artifacts(handoff_record_id,execution_plan_id,"
             "artifact_type,content_hash,content_size_bytes,prompt_bytes,"
             "authorization_id,storage_key,status,created_at) "
-            "VALUES (1,NULL,'codex_prompt','h',5,X'68656c6c6f',2,'key','prompt_publishing','2024-01-01')",
+            "VALUES (1,NULL,'codex_prompt','h',5,X'68656c6c6f',"
+            "2,'key','prompt_publishing','2024-01-01')",
             fragment="CHECK",
         )
 
@@ -587,13 +597,15 @@ def run_tests() -> None:
             "INSERT INTO handoff_artifacts(handoff_record_id,execution_plan_id,"
             "artifact_type,content_hash,content_size_bytes,prompt_bytes,"
             "authorization_id,storage_key,status,created_at) "
-            "VALUES (1,2,'codex_prompt',NULL,5,X'68656c6c6f',2,'key','prompt_publishing','2024-01-01')",
+            "VALUES (1,2,'codex_prompt',NULL,5,X'68656c6c6f',"
+            "2,'key','prompt_publishing','2024-01-01')",
             fragment="NOT NULL",
         )
 
         # Valid codex_prompt insert
         content = b"immutable prompt"
         import hashlib
+
         digest = hashlib.sha256(content).hexdigest()
         db.execute(
             "INSERT INTO handoff_artifacts(handoff_record_id,execution_plan_id,"
@@ -616,9 +628,7 @@ def run_tests() -> None:
         )
 
         # Mutation of published content_hash — immutability trigger
-        db.execute(
-            "UPDATE handoff_artifacts SET status='published' WHERE execution_plan_id=2"
-        )
+        db.execute("UPDATE handoff_artifacts SET status='published' WHERE execution_plan_id=2")
         assert_rejected(
             db,
             "UPDATE handoff_artifacts SET content_hash='changed' WHERE execution_plan_id=2",
@@ -679,7 +689,8 @@ def run_tests() -> None:
             db,
             "INSERT INTO workflow_human_waits(workflow_step_run_id,step_attempt,"
             "token_hash,reason,handoff_record_id,execution_attempt_id,"
-            "expires_at,status) VALUES (1,1,'tok1','WAITING_FOR_KIRO_REPORT',NULL,1,'2099-01-01','waiting')",
+            "expires_at,status) VALUES (1,1,'tok1',"
+            "'WAITING_FOR_KIRO_REPORT',NULL,1,'2099-01-01','waiting')",
             fragment="CHECK",
         )
 
@@ -687,7 +698,8 @@ def run_tests() -> None:
         db.execute(
             "INSERT INTO workflow_human_waits(workflow_step_run_id,step_attempt,"
             "token_hash,reason,handoff_record_id,execution_attempt_id,"
-            "expires_at,status) VALUES (1,1,'tok2','WAITING_FOR_IMPL_REPORT',NULL,1,'2099-01-01','waiting')"
+            "expires_at,status) VALUES (1,1,'tok2',"
+            "'WAITING_FOR_IMPL_REPORT',NULL,1,'2099-01-01','waiting')"
         )
         passed("valid WAITING_FOR_IMPL_REPORT wait row accepted")
 
@@ -696,7 +708,8 @@ def run_tests() -> None:
             db,
             "INSERT INTO workflow_human_waits(workflow_step_run_id,step_attempt,"
             "token_hash,reason,handoff_record_id,execution_attempt_id,"
-            "expires_at,status) VALUES (1,1,'tok3','WAITING_FOR_IMPL_REPORT',NULL,1,'2099-01-01','waiting')",
+            "expires_at,status) VALUES (1,1,'tok3',"
+            "'WAITING_FOR_IMPL_REPORT',NULL,1,'2099-01-01','waiting')",
             fragment="UNIQUE",
         )
 
